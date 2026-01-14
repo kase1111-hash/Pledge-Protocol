@@ -223,6 +223,113 @@ This is commitment infrastructure. Making pledges real.
 - **IPFS/Arweave**: Permanent storage of campaign data and commemoratives
 - **Oracle networks**: Verified external data sources
 
+## API Reference
+
+### Commemoratives API (Phase 3)
+
+Generate and manage commemorative tokens:
+
+```bash
+# Generate single commemorative
+POST /v1/commemoratives/generate
+{
+  "pledgeId": "pledge_123",
+  "campaignId": "campaign_abc",
+  "campaignName": "Portland Marathon 2026",
+  "subjectName": "Sarah Chen",
+  "beneficiaryName": "Portland Habitat",
+  "backerName": "Mike",
+  "backerAddress": "0x...",
+  "contributionAmount": "52.40",
+  "totalCampaignRaised": "2847.00",
+  "pledgedAt": 1710460800,
+  "resolvedAt": 1712448000,
+  "outcomeSummary": "26.2 miles in 3:47:22",
+  "templateType": "race_finish",
+  "customData": {
+    "raceName": "Portland Marathon",
+    "finishTime": "3:47:22",
+    "bibNumber": "4471"
+  }
+}
+
+# Generate for entire campaign
+POST /v1/commemoratives/generate/campaign
+
+# Get commemorative by ID
+GET /v1/commemoratives/:id
+
+# Get by pledge ID
+GET /v1/commemoratives/pledge/:pledgeId
+
+# Get all for campaign
+GET /v1/commemoratives/campaign/:campaignId
+
+# Get backer's commemoratives
+GET /v1/backers/me/commemoratives
+```
+
+### Template Types
+
+- **race_finish**: Bib-style certificate with timing results
+- **academic**: Diploma-style for educational achievements
+- **creative**: Album art style for creative projects
+- **generic**: Clean card design for general use
+
+### Storage
+
+Images and metadata are stored permanently:
+- **IPFS**: For pledge token metadata (content-addressed)
+- **Arweave**: For commemorative images (permanent)
+
+## Development
+
+### Phase Status
+
+- **Phase 1** ✅: Core protocol (campaigns, pledges, escrow, manual attestation)
+- **Phase 2** ✅: Oracle framework (API oracles, race timing, GitHub, resolution engine)
+- **Phase 3** ✅: Token system (commemoratives, image generation, IPFS/Arweave)
+- **Phase 4** (Planned): Tiered pledges, conditional pledges, aggregation oracles
+
+### Running Locally
+
+```bash
+# Install dependencies
+npm install
+
+# Run tests
+npm test
+
+# Start API server
+npm run dev
+```
+
+### Project Structure
+
+```
+contracts/           # Solidity smart contracts
+├── CampaignRegistry.sol
+├── EscrowVault.sol
+├── PledgeManager.sol
+├── OracleRegistry.sol
+└── tokens/
+    ├── PledgeToken.sol
+    └── CommemorativeToken.sol
+
+src/
+├── api/             # Express API server
+│   └── routes/
+├── oracle/          # Oracle system (Phase 2)
+├── tokens/          # Token system (Phase 3)
+│   ├── image-generator.ts
+│   ├── metadata-generator.ts
+│   ├── storage.ts
+│   └── commemorative-service.ts
+└── database/        # PostgreSQL schema
+
+test/                # Test suites
+```
+
 ## License
 
 [TBD]
