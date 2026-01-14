@@ -568,6 +568,166 @@ GET /v1/analytics/backers/:address/dashboard
 GET /v1/analytics/backers/:address/portfolio
 ```
 
+### Authentication API (Phase 7)
+
+Wallet-based authentication with session management:
+
+```bash
+# Request authentication challenge
+POST /v1/auth/challenge
+{ "address": "0x..." }
+
+# Verify signature and create session
+POST /v1/auth/verify
+{
+  "address": "0x...",
+  "message": "...",
+  "signature": "0x...",
+  "chainId": 1
+}
+
+# Get current session
+GET /v1/auth/session
+Headers: Authorization: Bearer <sessionId>
+
+# Logout current session
+POST /v1/auth/logout
+
+# Logout all sessions
+POST /v1/auth/logout/all
+```
+
+#### API Keys
+
+```bash
+# Create API key (admin only)
+POST /v1/auth/api-keys
+{
+  "name": "My Integration",
+  "permissions": ["campaign:read", "pledge:read"]
+}
+
+# List API keys
+GET /v1/auth/api-keys
+
+# Revoke API key
+DELETE /v1/auth/api-keys/:keyId
+```
+
+#### Role Management (Admin)
+
+```bash
+# Assign role
+POST /v1/auth/roles/:address
+{ "role": "creator" }
+
+# Remove role
+DELETE /v1/auth/roles/:address/:role
+
+# Get user roles
+GET /v1/auth/roles/:address
+```
+
+#### User Roles
+
+| Role | Description |
+|------|-------------|
+| `backer` | Default role, can create pledges and disputes |
+| `creator` | Can create and manage campaigns |
+| `arbitrator` | Can vote on and resolve disputes |
+| `admin` | Full system access |
+
+### Monitoring API (Phase 7)
+
+Health checks and system monitoring:
+
+```bash
+# Full health check
+GET /v1/monitoring/health
+
+# Kubernetes liveness probe
+GET /v1/monitoring/health/live
+
+# Kubernetes readiness probe
+GET /v1/monitoring/health/ready
+
+# Prometheus metrics
+GET /v1/monitoring/metrics
+
+# JSON metrics
+GET /v1/monitoring/metrics/json
+```
+
+#### Admin Endpoints (Authenticated)
+
+```bash
+# System statistics
+GET /v1/monitoring/stats
+
+# List background jobs
+GET /v1/monitoring/jobs?type=webhook:deliver&status=pending
+
+# Retry failed job
+POST /v1/monitoring/jobs/:jobId/retry
+
+# Cancel pending job
+POST /v1/monitoring/jobs/:jobId/cancel
+
+# Query audit logs
+GET /v1/monitoring/audit?action=campaign_created&since=1704067200000
+
+# Export audit logs
+GET /v1/monitoring/audit/export?format=csv
+
+# Security events
+GET /v1/monitoring/security?severity=high
+
+# Run cleanup
+POST /v1/monitoring/cleanup
+```
+
+### Rate Limiting (Phase 7)
+
+All API requests are rate limited based on authentication status:
+
+| Tier | Requests/Minute | Description |
+|------|-----------------|-------------|
+| `anonymous` | 30 | Unauthenticated requests |
+| `authenticated` | 100 | Logged-in users |
+| `premium` | 500 | Premium users |
+| `api` | 1000 | API key access |
+
+Rate limit headers are included in all responses:
+- `X-RateLimit-Limit`: Current tier
+- `X-RateLimit-Remaining`: Requests remaining
+- `X-RateLimit-Reset`: Unix timestamp when limit resets
+
+### Caching (Phase 7)
+
+The system uses in-memory caching with LRU eviction:
+
+- **Oracle responses**: 1 minute TTL
+- **Campaign data**: 5 minutes TTL
+- **Search results**: 30 seconds TTL
+- **Trending campaigns**: 1 minute TTL
+
+Cache invalidation occurs automatically on data updates.
+
+### Background Jobs (Phase 7)
+
+Async operations are processed via a background job queue:
+
+| Job Type | Description |
+|----------|-------------|
+| `oracle:query` | Oracle data fetching |
+| `oracle:aggregate` | Multi-source aggregation |
+| `pledge:release` | Fund release processing |
+| `commemorative:generate` | Image generation |
+| `webhook:deliver` | Webhook delivery with retry |
+| `campaign:resolve` | Campaign resolution |
+
+Jobs support priorities (low, normal, high, critical) and automatic retry with exponential backoff.
+
 ### Campaign Templates API (Phase 5)
 
 Pre-built templates for common campaign types accelerate setup.
@@ -682,6 +842,7 @@ Images and metadata are stored permanently:
 - **Phase 4** ✅: Advanced pledges (per-unit, tiered, conditional calculation types)
 - **Phase 5** ✅: Ecosystem (Strava/Academic/Streaming oracles, aggregator, templates)
 - **Phase 6** ✅: Governance (dispute resolution, webhooks, search/discovery, analytics)
+- **Phase 7** ✅: Production (authentication, rate limiting, caching, job queue, monitoring)
 
 ### Running Locally
 
@@ -718,7 +879,9 @@ src/
 │       ├── templates.ts        # Phase 5
 │       ├── disputes.ts         # Phase 6
 │       ├── webhooks.ts         # Phase 6
-│       └── analytics.ts        # Phase 6
+│       ├── analytics.ts        # Phase 6
+│       ├── auth.ts             # Phase 7
+│       └── monitoring.ts       # Phase 7
 ├── oracle/          # Oracle system (Phase 2 + 5)
 │   ├── providers/
 │   │   ├── api-provider.ts
@@ -746,6 +909,16 @@ src/
 │   └── notification-service.ts
 ├── discovery/       # Search & discovery (Phase 6)
 │   └── search-service.ts
+├── security/        # Auth & security (Phase 7)
+│   ├── types.ts
+│   ├── auth-service.ts
+│   ├── rate-limiter.ts
+│   ├── audit-logger.ts
+│   └── middleware.ts
+├── infrastructure/  # Caching & jobs (Phase 7)
+│   ├── cache.ts
+│   ├── job-queue.ts
+│   └── health.ts
 └── database/        # PostgreSQL schema
 
 test/                # Test suites
