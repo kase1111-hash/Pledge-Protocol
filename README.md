@@ -686,6 +686,252 @@ GET /v1/monitoring/security?severity=high
 POST /v1/monitoring/cleanup
 ```
 
+### Multi-Chain API (Phase 8)
+
+Deploy and manage campaigns across multiple blockchain networks:
+
+```bash
+# List supported chains
+GET /v1/chains
+
+# Get chain details
+GET /v1/chains/:chainId
+
+# Get chain contracts
+GET /v1/chains/:chainId/contracts
+
+# Get campaigns on chain
+GET /v1/chains/:chainId/campaigns
+
+# Estimate deployment gas
+POST /v1/chains/:chainId/estimate
+{
+  "name": "Portland Marathon 2026",
+  "beneficiary": "0x...",
+  "deadline": 1712448000
+}
+
+# Deploy to single chain
+POST /v1/chains/:chainId/deploy
+{
+  "campaignId": "campaign_123",
+  "creator": "0x...",
+  "name": "Portland Marathon 2026",
+  "beneficiary": "0x...",
+  "deadline": 1712448000
+}
+
+# Deploy to multiple chains
+POST /v1/chains/deploy-multi
+{
+  "campaignId": "campaign_123",
+  "creator": "0x...",
+  "chainIds": [137, 42161, 10],
+  "campaignData": { ... }
+}
+
+# Get recommended chains
+POST /v1/chains/recommended
+{ "preferLowCost": true, "requireMainnet": false }
+```
+
+#### Supported Chains
+
+| Chain | ID | Type | Features |
+|-------|-----|------|----------|
+| Ethereum | 1 | Mainnet | Production, EIP-1559 |
+| Polygon | 137 | Mainnet | Low cost, fast blocks |
+| Arbitrum One | 42161 | Mainnet | L2 rollup, low fees |
+| Optimism | 10 | Mainnet | L2 rollup, OP Stack |
+| Base | 8453 | Mainnet | Coinbase L2 |
+| Sepolia | 11155111 | Testnet | Ethereum testnet |
+| Polygon Amoy | 80002 | Testnet | Polygon testnet |
+| Arbitrum Sepolia | 421614 | Testnet | Arbitrum testnet |
+| Optimism Sepolia | 11155420 | Testnet | Optimism testnet |
+| Base Sepolia | 84532 | Testnet | Base testnet |
+| Local | 31337 | Local | Hardhat/Anvil |
+
+### Social API (Phase 8)
+
+User profiles, follows, comments, and activity feeds:
+
+```bash
+# Get user profile
+GET /v1/social/users/:address
+
+# Update own profile
+PUT /v1/social/users/me
+{
+  "displayName": "Sarah Chen",
+  "bio": "Marathon runner for charity",
+  "avatar": "https://...",
+  "preferences": {
+    "publicProfile": true,
+    "showPledgeAmounts": true,
+    "emailNotifications": true
+  }
+}
+
+# Search users
+GET /v1/social/users/search?q=sarah
+
+# Follow user
+POST /v1/social/users/:address/follow
+
+# Unfollow user
+DELETE /v1/social/users/:address/follow
+
+# Check if following
+GET /v1/social/users/:address/is-following
+
+# Get followers
+GET /v1/social/users/:address/followers
+
+# Get following
+GET /v1/social/users/:address/following
+```
+
+#### Comments
+
+```bash
+# Create comment
+POST /v1/social/campaigns/:campaignId/comments
+{
+  "content": "Good luck on the marathon!",
+  "parentId": null
+}
+
+# Get campaign comments
+GET /v1/social/campaigns/:campaignId/comments?sortBy=newest&limit=50
+
+# Update comment
+PUT /v1/social/comments/:commentId
+{ "content": "Updated comment text" }
+
+# Delete comment
+DELETE /v1/social/comments/:commentId
+
+# Like comment
+POST /v1/social/comments/:commentId/like
+
+# Unlike comment
+DELETE /v1/social/comments/:commentId/like
+
+# Report comment
+POST /v1/social/comments/:commentId/report
+{ "reason": "spam" }
+
+# Pin comment (admin)
+POST /v1/social/comments/:commentId/pin
+{ "pinned": true }
+```
+
+#### Activity Feed
+
+```bash
+# Personal feed (from followed users)
+GET /v1/social/feed?limit=50
+
+# Global feed
+GET /v1/social/feed/global
+
+# User activity
+GET /v1/social/users/:address/activity?types=campaign_created,pledge_created
+```
+
+#### Leaderboards
+
+```bash
+# Creator leaderboard
+GET /v1/social/leaderboard/creators?metric=raised&period=monthly&limit=50
+
+# Backer leaderboard
+GET /v1/social/leaderboard/backers?metric=pledged&limit=50
+```
+
+Metrics: `raised`, `campaigns`, `successRate`, `backers` (creators) or `pledged`, `campaigns`, `commemoratives` (backers)
+
+Periods: `weekly`, `monthly`, `yearly`, `all_time`
+
+#### Statistics
+
+```bash
+# Social system stats
+GET /v1/social/stats
+```
+
+### TypeScript SDK (Phase 8)
+
+Developer-friendly client library for integrating with Pledge Protocol:
+
+```typescript
+import { createClient, ChainId } from "@pledge-protocol/sdk";
+
+// Initialize client
+const client = createClient({
+  baseUrl: "https://api.pledgeprotocol.io",
+  chainId: ChainId.Polygon,
+  apiKey: "your-api-key", // Optional
+});
+
+// Switch chains
+const arbitrumClient = client.forChain(ChainId.Arbitrum);
+
+// Campaigns
+const campaigns = await client.campaigns.list({ status: "active", limit: 10 });
+const campaign = await client.campaigns.get("campaign_123");
+const newCampaign = await client.campaigns.create({
+  name: "Portland Marathon 2026",
+  beneficiary: "0x...",
+  milestones: [...],
+});
+
+// Pledges
+const pledges = await client.pledges.list({ campaignId: "campaign_123" });
+const pledge = await client.pledges.create({
+  campaignId: "campaign_123",
+  amount: "50000000000000000000",
+  calculationType: "per_unit",
+  perUnitAmount: "2000000000000000000",
+});
+
+// Oracles
+const oracleResult = await client.oracles.query("oracle_id", { eventId: "123" });
+
+// Disputes
+const dispute = await client.disputes.create({
+  campaignId: "campaign_123",
+  category: "oracle_disagreement",
+  title: "Data mismatch",
+  description: "...",
+});
+
+// Commemoratives
+const commemoratives = await client.commemoratives.listByBacker("0x...");
+
+// Users (social)
+const profile = await client.users.getProfile("0x...");
+await client.users.follow("0x...");
+const feed = await client.users.getFeed();
+
+// Authentication
+const challenge = await client.auth.getChallenge("0x...");
+const session = await client.auth.verify({
+  address: "0x...",
+  message: challenge.message,
+  signature: "0x...",
+});
+client.setSessionId(session.sessionId);
+```
+
+#### SDK Features
+
+- **Type-safe**: Full TypeScript types for all API responses
+- **Multi-chain**: Easy chain switching with `forChain()`
+- **Authentication**: Session and API key support
+- **Retry logic**: Automatic retries with exponential backoff
+- **Error handling**: Structured error responses
+
 ### Rate Limiting (Phase 7)
 
 All API requests are rate limited based on authentication status:
@@ -843,6 +1089,7 @@ Images and metadata are stored permanently:
 - **Phase 5** ✅: Ecosystem (Strava/Academic/Streaming oracles, aggregator, templates)
 - **Phase 6** ✅: Governance (dispute resolution, webhooks, search/discovery, analytics)
 - **Phase 7** ✅: Production (authentication, rate limiting, caching, job queue, monitoring)
+- **Phase 8** ✅: Ecosystem expansion (multi-chain, TypeScript SDK, social features)
 
 ### Running Locally
 
@@ -881,7 +1128,9 @@ src/
 │       ├── webhooks.ts         # Phase 6
 │       ├── analytics.ts        # Phase 6
 │       ├── auth.ts             # Phase 7
-│       └── monitoring.ts       # Phase 7
+│       ├── monitoring.ts       # Phase 7
+│       ├── social.ts           # Phase 8
+│       └── chains.ts           # Phase 8
 ├── oracle/          # Oracle system (Phase 2 + 5)
 │   ├── providers/
 │   │   ├── api-provider.ts
@@ -919,6 +1168,16 @@ src/
 │   ├── cache.ts
 │   ├── job-queue.ts
 │   └── health.ts
+├── multichain/      # Multi-chain support (Phase 8)
+│   ├── config.ts
+│   ├── registry.ts
+│   └── deployment-service.ts
+├── sdk/             # TypeScript SDK (Phase 8)
+│   ├── types.ts
+│   └── client.ts
+├── social/          # Social features (Phase 8)
+│   ├── types.ts
+│   └── social-service.ts
 └── database/        # PostgreSQL schema
 
 test/                # Test suites
