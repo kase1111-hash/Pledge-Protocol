@@ -302,6 +302,137 @@ Supported operators:
 
 Example: Release $50 if finish time is under 4 hours (14400 seconds).
 
+### Extended Oracle Providers (Phase 5)
+
+Phase 5 adds additional oracle integrations for broader use cases.
+
+#### Strava Integration
+
+Fitness activity verification via Strava:
+
+```typescript
+import { StravaProvider } from "./oracle";
+
+const strava = StravaProvider.create(clientId, clientSecret);
+strava.setTokens(accessToken, refreshToken, expiresAt);
+
+// Query specific activity
+const result = await strava.queryActivity("12345");
+
+// Query athlete's activities
+const activities = await strava.queryActivities(afterTimestamp, beforeTimestamp);
+```
+
+Response fields: `activityId`, `activityType`, `distanceMeters`, `distanceMiles`, `elapsedTimeSeconds`, `movingTimeSeconds`, `totalElevationGainMeters`, `averageSpeedMps`
+
+#### Academic Verification
+
+Education milestone verification (enrollment, graduation, GPA):
+
+```typescript
+import { AcademicProvider } from "./oracle";
+
+const academic = AcademicProvider.createForProvider("nsc", apiKey);
+
+// Verify enrollment
+const enrollment = await academic.verifyEnrollment(studentId, institutionCode);
+
+// Verify degree
+const degree = await academic.verifyDegree(studentId, institutionCode);
+```
+
+Response fields: `enrolled`, `creditsCompleted`, `gpa`, `graduationDate`, `degreeConferred`, `enrollmentStatus`
+
+#### Streaming Platforms
+
+Content release verification (Spotify, YouTube, Twitch):
+
+```typescript
+import { StreamingProvider } from "./oracle";
+
+const spotify = StreamingProvider.createForPlatform("spotify", apiKey);
+const result = await spotify.verifySpotifyRelease(albumId);
+
+const youtube = StreamingProvider.createForPlatform("youtube", apiKey);
+const video = await youtube.verifyYouTubeVideo(videoId);
+```
+
+#### Aggregator Oracle
+
+Multi-source consensus for high-value campaigns:
+
+```typescript
+import { AggregatorProvider, RaceTimingProvider, StravaProvider } from "./oracle";
+
+// Create sources
+const athlinks = RaceTimingProvider.createForProvider("athlinks", apiKey);
+const strava = StravaProvider.create(clientId, clientSecret);
+
+// Create aggregator requiring majority consensus
+const aggregator = AggregatorProvider.createMajority(
+  "marathon-verification",
+  "Marathon Multi-Source",
+  [athlinks, strava],
+  0.5 // 50% threshold
+);
+
+const result = await aggregator.query({ eventId, bibNumber });
+```
+
+Aggregation methods:
+- `all`: All sources must agree
+- `majority`: More than threshold percentage must agree
+- `any`: At least one source must succeed
+- `weighted`: Weighted voting by source trust level
+- `threshold`: At least N sources must agree
+
+### Campaign Templates API (Phase 5)
+
+Pre-built templates for common campaign types accelerate setup.
+
+```bash
+# List all templates
+GET /v1/templates
+
+# Get templates by category
+GET /v1/templates?category=fitness
+
+# Get template details
+GET /v1/templates/charity-race
+
+# Validate field values
+POST /v1/templates/:templateId/validate
+{ "fieldValues": { "eventName": "Portland Marathon", ... } }
+
+# Preview campaign without creating
+POST /v1/templates/:templateId/preview
+{ "fieldValues": { ... } }
+
+# Generate campaign from template
+POST /v1/templates/:templateId/generate
+{
+  "fieldValues": {
+    "eventName": "Portland Marathon 2026",
+    "participantName": "Sarah Chen",
+    "beneficiaryAddress": "0x...",
+    "eventDate": "2026-04-06",
+    "eventDistance": 26.2,
+    "timingProvider": "athlinks"
+  }
+}
+```
+
+#### Available Templates
+
+| Template | Category | Description |
+|----------|----------|-------------|
+| `charity-race` | fitness | Marathon/race fundraising with per-mile pledges |
+| `creative-project` | creative | Album/book/film with milestone releases |
+| `academic-achievement` | education | Student funding with enrollment verification |
+| `open-source-dev` | opensource | GitHub-verified development bounties |
+| `business-launch` | business | Small business from permits to opening |
+| `research-study` | research | Scientific research to publication |
+
 ### Commemoratives API (Phase 3)
 
 Generate and manage commemorative tokens:
@@ -367,6 +498,7 @@ Images and metadata are stored permanently:
 - **Phase 2** ✅: Oracle framework (API oracles, race timing, GitHub, resolution engine)
 - **Phase 3** ✅: Token system (commemoratives, image generation, IPFS/Arweave)
 - **Phase 4** ✅: Advanced pledges (per-unit, tiered, conditional calculation types)
+- **Phase 5** ✅: Ecosystem (Strava/Academic/Streaming oracles, aggregator, templates)
 
 ### Running Locally
 
@@ -396,12 +528,30 @@ contracts/           # Solidity smart contracts
 src/
 ├── api/             # Express API server
 │   └── routes/
-├── oracle/          # Oracle system (Phase 2)
+│       ├── campaigns.ts
+│       ├── pledges.ts
+│       ├── oracles.ts
+│       ├── commemoratives.ts
+│       └── templates.ts    # Phase 5
+├── oracle/          # Oracle system (Phase 2 + 5)
+│   ├── providers/
+│   │   ├── api-provider.ts
+│   │   ├── race-timing-provider.ts
+│   │   ├── github-provider.ts
+│   │   ├── strava-provider.ts      # Phase 5
+│   │   ├── academic-provider.ts    # Phase 5
+│   │   ├── streaming-provider.ts   # Phase 5
+│   │   └── aggregator-provider.ts  # Phase 5
+│   └── resolution-engine.ts
 ├── tokens/          # Token system (Phase 3)
 │   ├── image-generator.ts
 │   ├── metadata-generator.ts
 │   ├── storage.ts
 │   └── commemorative-service.ts
+├── templates/       # Template system (Phase 5)
+│   ├── types.ts
+│   ├── builtin-templates.ts
+│   └── template-service.ts
 └── database/        # PostgreSQL schema
 
 test/                # Test suites
