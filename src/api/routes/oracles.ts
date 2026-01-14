@@ -1,12 +1,25 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
+import {
+  OracleRouter,
+  oracleRouter,
+  RaceTimingProvider,
+  GitHubProvider,
+  WebhookHandler,
+  ResolutionEngine,
+  OracleConfig,
+} from "../../oracle";
 
 const router = Router();
 
-// In-memory storage for Phase 1
+// In-memory storage
 const oracles: Map<string, Oracle> = new Map();
 const attestations: Map<string, Attestation> = new Map();
+
+// Initialize oracle router with providers
+let webhookHandler: WebhookHandler | null = null;
+let resolutionEngine: ResolutionEngine | null = null;
 
 interface Oracle {
   id: string;
@@ -18,6 +31,7 @@ interface Oracle {
   trustLevel: "official" | "verified" | "community" | "custom";
   active: boolean;
   createdAt: number;
+  config?: OracleConfig;
 }
 
 interface Attestation {
@@ -34,6 +48,7 @@ interface Attestation {
   submittedAt: number;
 }
 
+// Validation schemas
 const submitAttestationSchema = z.object({
   campaignId: z.string(),
   milestoneId: z.string(),
@@ -44,11 +59,31 @@ const submitAttestationSchema = z.object({
   signature: z.string(),
 });
 
+const registerOracleSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  type: z.enum(["api", "attestation", "aggregator"]),
+  endpoint: z.string().optional(),
+  attestor: z.string().optional(),
+  trustLevel: z.enum(["official", "verified", "community", "custom"]).optional(),
+  config: z.record(z.any()).optional(),
+});
+
+const queryOracleSchema = z.object({
+  params: z.record(z.any()),
+  campaignId: z.string().optional(),
+  milestoneId: z.string().optional(),
+});
+
 // List oracles
 router.get("/", (req: Request, res: Response) => {
-  const { type } = req.query;
+  const { type, active } = req.query;
 
-  let result = Array.from(oracles.values()).filter((o) => o.active);
+  let result = Array.from(oracles.values());
+
+  if (active !== "false") {
+    result = result.filter((o) => o.active);
+  }
 
   if (type) {
     result = result.filter((o) => o.type === type);
@@ -58,8 +93,11 @@ router.get("/", (req: Request, res: Response) => {
     oracles: result.map((o) => ({
       id: o.id,
       name: o.name,
+      description: o.description,
       type: o.type,
       trustLevel: o.trustLevel,
+      active: o.active,
+      endpoint: o.type === "api" ? o.endpoint : undefined,
     })),
   });
 });
@@ -80,60 +118,153 @@ router.get("/:id", (req: Request, res: Response) => {
   res.json(oracle);
 });
 
-// Manual oracle query
+// Register a new oracle (Phase 2)
+router.post("/", async (req: Request, res: Response) => {
+  try {
+    const body = registerOracleSchema.parse(req.body);
+
+    const id = `oracle_${uuidv4().slice(0, 8)}`;
+    const now = Math.floor(Date.now() / 1000);
+
+    const oracle: Oracle = {
+      id,
+      name: body.name,
+      description: body.description,
+      type: body.type,
+      attestor: body.attestor || null,
+      endpoint: body.endpoint || null,
+      trustLevel: body.trustLevel || "custom",
+      active: true,
+      createdAt: now,
+    };
+
+    oracles.set(id, oracle);
+
+    // Register with oracle router if it's an API oracle
+    if (body.type === "api" && body.endpoint) {
+      const config: OracleConfig = {
+        id,
+        name: body.name,
+        description: body.description,
+        type: "api",
+        trustLevel: oracle.trustLevel as any,
+        active: true,
+        endpoint: body.endpoint,
+        ...body.config,
+      };
+
+      oracleRouter.registerProvider(config);
+    }
+
+    res.status(201).json(oracle);
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: {
+          code: "INVALID_REQUEST",
+          message: "Invalid request body",
+          details: error.errors,
+        },
+      });
+    }
+    throw error;
+  }
+});
+
+// Query an oracle (Phase 2 - supports API oracles)
 router.post("/:id/query", async (req: Request, res: Response) => {
-  const oracle = oracles.get(req.params.id);
+  try {
+    const oracle = oracles.get(req.params.id);
 
-  if (!oracle) {
-    return res.status(404).json({
-      error: {
-        code: "ORACLE_NOT_FOUND",
-        message: `Oracle with ID ${req.params.id} does not exist`,
-      },
-    });
-  }
+    if (!oracle) {
+      return res.status(404).json({
+        error: {
+          code: "ORACLE_NOT_FOUND",
+          message: `Oracle with ID ${req.params.id} does not exist`,
+        },
+      });
+    }
 
-  if (!oracle.active) {
-    return res.status(422).json({
-      error: {
-        code: "ORACLE_INACTIVE",
-        message: "Oracle is not active",
-      },
-    });
-  }
+    if (!oracle.active) {
+      return res.status(422).json({
+        error: {
+          code: "ORACLE_INACTIVE",
+          message: "Oracle is not active",
+        },
+      });
+    }
 
-  // In Phase 1, only attestation oracles are supported
-  if (oracle.type !== "attestation") {
-    return res.status(422).json({
+    const body = queryOracleSchema.parse(req.body);
+
+    // Handle attestation oracles (Phase 1 style)
+    if (oracle.type === "attestation") {
+      const { campaignId, milestoneId } = body.params || {};
+      const key = `${campaignId}:${milestoneId}`;
+      const attestation = attestations.get(key);
+
+      if (attestation) {
+        return res.json({
+          success: true,
+          data: {
+            completed: attestation.completed,
+            value: attestation.value,
+            evidenceUri: attestation.evidenceUri,
+          },
+          timestamp: attestation.submittedAt,
+          source: oracle.name,
+          cached: false,
+        });
+      }
+
+      return res.json({
+        success: false,
+        data: null,
+        message: "No attestation found for this milestone",
+        cached: false,
+      });
+    }
+
+    // Handle API oracles (Phase 2)
+    if (oracle.type === "api") {
+      const response = await oracleRouter.query({
+        oracleId: oracle.id,
+        campaignId: body.campaignId || "",
+        milestoneId: body.milestoneId || "",
+        params: body.params,
+      });
+
+      return res.json(response);
+    }
+
+    // Handle aggregator oracles
+    if (oracle.type === "aggregator") {
+      const response = await oracleRouter.query({
+        oracleId: oracle.id,
+        campaignId: body.campaignId || "",
+        milestoneId: body.milestoneId || "",
+        params: body.params,
+      });
+
+      return res.json(response);
+    }
+
+    res.status(422).json({
       error: {
         code: "ORACLE_TYPE_NOT_SUPPORTED",
-        message: "Only attestation oracles are supported in Phase 1",
+        message: `Oracle type ${oracle.type} not supported`,
       },
     });
-  }
-
-  // Return existing attestation if any
-  const { campaignId, milestoneId } = req.body.params || {};
-  const key = `${campaignId}:${milestoneId}`;
-  const attestation = attestations.get(key);
-
-  if (attestation) {
-    res.json({
-      success: true,
-      data: {
-        completed: attestation.completed,
-        value: attestation.value,
-        evidenceUri: attestation.evidenceUri,
-      },
-      timestamp: attestation.submittedAt,
-      source: oracle.name,
-    });
-  } else {
-    res.json({
-      success: false,
-      data: null,
-      message: "No attestation found for this milestone",
-    });
+  } catch (error) {
+    if (error instanceof z.ZodError) {
+      return res.status(400).json({
+        error: {
+          code: "INVALID_REQUEST",
+          message: "Invalid request body",
+          details: error.errors,
+        },
+      });
+    }
+    throw error;
   }
 });
 
@@ -215,7 +346,80 @@ router.post("/attestations", async (req: Request, res: Response) => {
   }
 });
 
-// Seed some default oracles for testing
+// Webhook endpoint for oracle callbacks (Phase 2)
+router.post("/:id/webhook", async (req: Request, res: Response) => {
+  const oracleId = req.params.id;
+
+  if (!webhookHandler) {
+    return res.status(503).json({
+      error: {
+        code: "SERVICE_UNAVAILABLE",
+        message: "Webhook handler not initialized",
+      },
+    });
+  }
+
+  try {
+    const result = await webhookHandler.handleWebhook(
+      oracleId,
+      req.body,
+      req.headers as Record<string, string>
+    );
+
+    res.status(result.success ? 200 : 400).json(result);
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: (error as Error).message,
+    });
+  }
+});
+
+// Health check for all oracles
+router.get("/health/all", async (req: Request, res: Response) => {
+  const results = await oracleRouter.healthCheckAll();
+
+  res.json({
+    healthy: Object.values(results).every((v) => v),
+    oracles: results,
+    timestamp: Date.now(),
+  });
+});
+
+// Verify a milestone condition (Phase 2)
+router.post("/:id/verify", async (req: Request, res: Response) => {
+  try {
+    const { campaignId, milestoneId, condition, params } = req.body;
+
+    if (!campaignId || !milestoneId || !condition) {
+      return res.status(400).json({
+        error: {
+          code: "INVALID_REQUEST",
+          message: "campaignId, milestoneId, and condition are required",
+        },
+      });
+    }
+
+    const result = await oracleRouter.verifyMilestone(
+      req.params.id,
+      campaignId,
+      milestoneId,
+      condition,
+      params || {}
+    );
+
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      error: {
+        code: "VERIFICATION_FAILED",
+        message: (error as Error).message,
+      },
+    });
+  }
+});
+
+// Seed default oracles
 function seedOracles() {
   const defaultOracles: Oracle[] = [
     {
@@ -230,21 +434,75 @@ function seedOracles() {
       createdAt: Math.floor(Date.now() / 1000),
     },
     {
-      id: "oracle_race_timing",
-      name: "Race Timing Oracle",
-      description: "Official race timing integration (Phase 2)",
+      id: "oracle_race_athlinks",
+      name: "Athlinks Race Timing",
+      description: "Official race timing via Athlinks API",
       type: "api",
       attestor: null,
-      endpoint: "https://api.racetiming.example/results",
+      endpoint: "https://api.athlinks.com/v1/results",
       trustLevel: "official",
-      active: false, // Not active in Phase 1
+      active: true,
+      createdAt: Math.floor(Date.now() / 1000),
+    },
+    {
+      id: "oracle_race_runsignup",
+      name: "RunSignUp Race Timing",
+      description: "Official race timing via RunSignUp API",
+      type: "api",
+      attestor: null,
+      endpoint: "https://runsignup.com/Rest/race/results",
+      trustLevel: "official",
+      active: true,
+      createdAt: Math.floor(Date.now() / 1000),
+    },
+    {
+      id: "oracle_github",
+      name: "GitHub Activity",
+      description: "GitHub PR and commit verification",
+      type: "api",
+      attestor: null,
+      endpoint: "https://api.github.com",
+      trustLevel: "official",
+      active: true,
       createdAt: Math.floor(Date.now() / 1000),
     },
   ];
 
-  defaultOracles.forEach((o) => oracles.set(o.id, o));
+  defaultOracles.forEach((o) => {
+    oracles.set(o.id, o);
+
+    // Register API oracles with the router
+    if (o.type === "api" && o.endpoint) {
+      try {
+        const config: OracleConfig = {
+          id: o.id,
+          name: o.name,
+          description: o.description,
+          type: "api",
+          trustLevel: o.trustLevel as any,
+          active: o.active,
+          endpoint: o.endpoint,
+          timeout: 15000,
+          retries: 3,
+        };
+
+        oracleRouter.registerProvider(config);
+      } catch (error) {
+        console.warn(`Failed to register oracle ${o.id}:`, error);
+      }
+    }
+  });
 }
 
 seedOracles();
 
 export default router;
+
+// Export for initialization
+export function initializeOracleServices(
+  wh: WebhookHandler,
+  re: ResolutionEngine
+) {
+  webhookHandler = wh;
+  resolutionEngine = re;
+}
