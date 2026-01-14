@@ -386,6 +386,188 @@ Aggregation methods:
 - `weighted`: Weighted voting by source trust level
 - `threshold`: At least N sources must agree
 
+### Dispute Resolution API (Phase 6)
+
+Handle disagreements with a multi-tier resolution system:
+
+```bash
+# Create a dispute
+POST /v1/disputes
+{
+  "campaignId": "campaign_123",
+  "pledgeId": "pledge_456",
+  "milestoneId": "milestone_789",
+  "category": "oracle_disagreement",
+  "title": "Oracle data mismatch",
+  "description": "The oracle reported incorrect race results"
+}
+
+# List disputes
+GET /v1/disputes?campaignId=campaign_123&status=pending
+
+# Get dispute details
+GET /v1/disputes/:disputeId
+
+# Submit evidence
+POST /v1/disputes/:disputeId/evidence
+{
+  "type": "document",
+  "description": "Screenshot of official results",
+  "content": "https://evidence.example.com/screenshot.png"
+}
+
+# Open voting
+POST /v1/disputes/:disputeId/voting/open
+{
+  "eligibleVoters": ["0x...", "0x..."],
+  "votingPowers": { "0x...": "100", "0x...": "200" }
+}
+
+# Cast vote
+POST /v1/disputes/:disputeId/voting/cast
+{
+  "voter": "0x...",
+  "vote": "release",
+  "rationale": "Evidence clearly shows milestone was met"
+}
+
+# Close voting
+POST /v1/disputes/:disputeId/voting/close
+
+# Escalate dispute
+POST /v1/disputes/:disputeId/escalate
+{ "reason": "Community vote was inconclusive" }
+
+# Resolve dispute
+POST /v1/disputes/:disputeId/resolve
+{
+  "outcome": "release",
+  "rationale": "Creator fulfilled obligations"
+}
+
+# Appeal resolution
+POST /v1/disputes/:disputeId/appeal
+{ "reason": "New evidence discovered" }
+```
+
+#### Dispute Categories
+
+- `oracle_disagreement`: Oracle data conflicts with reality
+- `oracle_failure`: Oracle did not respond or returned errors
+- `milestone_dispute`: Disagreement about milestone completion
+- `calculation_error`: Pledge amount calculated incorrectly
+- `fraud_claim`: Suspected fraudulent activity
+- `technical_issue`: Smart contract or platform bug
+- `other`: Other issues
+
+#### Resolution Tiers
+
+| Tier | Description |
+|------|-------------|
+| `automated` | Technical issues resolved by system |
+| `community` | Community voting for standard disputes |
+| `creator` | Creator mediation for complex cases |
+| `council` | Expert panel for fraud and high-value disputes |
+
+### Webhooks API (Phase 6)
+
+Receive real-time notifications about campaign events:
+
+```bash
+# Create webhook
+POST /v1/webhooks
+{
+  "name": "Campaign Updates",
+  "url": "https://myapp.com/webhook",
+  "events": ["campaign_created", "pledge_released", "milestone_verified"],
+  "secret": "my-webhook-secret-key"
+}
+
+# List webhooks
+GET /v1/webhooks
+
+# Get available events
+GET /v1/webhooks/events
+
+# Update webhook
+PUT /v1/webhooks/:webhookId
+{
+  "events": ["campaign_created", "pledge_released"],
+  "active": true
+}
+
+# Test webhook
+POST /v1/webhooks/:webhookId/test
+
+# Get delivery logs
+GET /v1/webhooks/:webhookId/logs
+
+# Delete webhook
+DELETE /v1/webhooks/:webhookId
+```
+
+#### Event Types
+
+| Category | Events |
+|----------|--------|
+| Campaign | `campaign_created`, `campaign_activated`, `campaign_deadline_approaching`, `campaign_resolved`, `campaign_cancelled` |
+| Pledge | `pledge_created`, `pledge_escrowed`, `pledge_released`, `pledge_refunded`, `pledge_cancelled` |
+| Milestone | `milestone_verified`, `milestone_failed`, `milestone_pending` |
+| Oracle | `oracle_data_received`, `oracle_timeout`, `oracle_disagreement` |
+| Dispute | `dispute_created`, `dispute_evidence_added`, `dispute_voting_opened`, `dispute_resolved` |
+| Commemorative | `commemorative_generated`, `commemorative_minted` |
+
+### Search & Discovery API (Phase 6)
+
+Find and explore campaigns:
+
+```bash
+# Search campaigns
+GET /v1/analytics/search?q=marathon&category=fitness&status=active&sort=trendingScore
+
+# Get trending campaigns
+GET /v1/analytics/platform/trending
+
+# Get similar campaigns
+GET /v1/analytics/campaigns/:campaignId/similar
+
+# Platform overview
+GET /v1/analytics/platform/overview
+```
+
+#### Search Filters
+
+- `q`: Text search in name, description, tags
+- `category`: Filter by category (fitness, education, creative, etc.)
+- `status`: Filter by status (active, resolved, cancelled)
+- `oracleType`: Filter by oracle type
+- `tags`: Filter by tags (comma-separated)
+- `minPledged`, `maxPledged`: Filter by pledged amount
+- `minBackers`: Filter by minimum backer count
+- `sort`: Sort field (trendingScore, totalPledged, backerCount, createdAt)
+- `order`: Sort order (asc, desc)
+
+### Analytics Dashboard API (Phase 6)
+
+Analytics for creators and backers:
+
+```bash
+# Creator dashboard
+GET /v1/analytics/creators/:address/dashboard
+
+# Creator campaign analytics
+GET /v1/analytics/creators/:address/campaigns
+
+# Creator performance over time
+GET /v1/analytics/creators/:address/performance
+
+# Backer dashboard
+GET /v1/analytics/backers/:address/dashboard
+
+# Backer portfolio
+GET /v1/analytics/backers/:address/portfolio
+```
+
 ### Campaign Templates API (Phase 5)
 
 Pre-built templates for common campaign types accelerate setup.
@@ -499,6 +681,7 @@ Images and metadata are stored permanently:
 - **Phase 3** ✅: Token system (commemoratives, image generation, IPFS/Arweave)
 - **Phase 4** ✅: Advanced pledges (per-unit, tiered, conditional calculation types)
 - **Phase 5** ✅: Ecosystem (Strava/Academic/Streaming oracles, aggregator, templates)
+- **Phase 6** ✅: Governance (dispute resolution, webhooks, search/discovery, analytics)
 
 ### Running Locally
 
@@ -532,7 +715,10 @@ src/
 │       ├── pledges.ts
 │       ├── oracles.ts
 │       ├── commemoratives.ts
-│       └── templates.ts    # Phase 5
+│       ├── templates.ts        # Phase 5
+│       ├── disputes.ts         # Phase 6
+│       ├── webhooks.ts         # Phase 6
+│       └── analytics.ts        # Phase 6
 ├── oracle/          # Oracle system (Phase 2 + 5)
 │   ├── providers/
 │   │   ├── api-provider.ts
@@ -552,6 +738,14 @@ src/
 │   ├── types.ts
 │   ├── builtin-templates.ts
 │   └── template-service.ts
+├── governance/      # Dispute resolution (Phase 6)
+│   ├── types.ts
+│   └── dispute-service.ts
+├── notifications/   # Webhooks & notifications (Phase 6)
+│   ├── types.ts
+│   └── notification-service.ts
+├── discovery/       # Search & discovery (Phase 6)
+│   └── search-service.ts
 └── database/        # PostgreSQL schema
 
 test/                # Test suites
