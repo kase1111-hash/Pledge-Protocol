@@ -13,7 +13,7 @@
     "api:dev": "ts-node-dev --respawn src/api/server.ts",
     "api:start": "node dist/api/server.js",
     "build": "tsc",
-    "lint": "eslint . --ext .ts,.sol",
+    "lint": "eslint . --ext .ts",
     "format": "prettier --write '**/*.{ts,sol,json}'"
   },
   "keywords": [

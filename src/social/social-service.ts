@@ -685,7 +685,7 @@ export class SocialService {
     period: "all_time" | "monthly" | "weekly" = "all_time",
     limit: number = 50
   ): LeaderboardEntry[] {
-    let profiles = Array.from(this.profiles.values()).filter(
+    const profiles = Array.from(this.profiles.values()).filter(
       (p) => p.stats.campaignsCreated > 0
     );
 
@@ -729,7 +729,7 @@ export class SocialService {
     metric: "pledged" | "campaigns" | "commemoratives",
     limit: number = 50
   ): LeaderboardEntry[] {
-    let profiles = Array.from(this.profiles.values()).filter(
+    const profiles = Array.from(this.profiles.values()).filter(
       (p) => p.stats.campaignsBacked > 0
     );
 
