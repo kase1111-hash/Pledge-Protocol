@@ -2,13 +2,17 @@ import express, { Express, Request, Response, NextFunction } from "express";
 import dotenv from "dotenv";
 import campaignRoutes from "./routes/campaigns";
 import pledgeRoutes from "./routes/pledges";
-import oracleRoutes from "./routes/oracles";
+import oracleRoutes, { initializeOracleServices } from "./routes/oracles";
 import backerRoutes from "./routes/backers";
+import resolutionRoutes, { webhookHandler, resolutionEngine } from "./routes/resolution";
 
 dotenv.config();
 
 const app: Express = express();
 const PORT = process.env.PORT || 3000;
+
+// Initialize oracle services
+initializeOracleServices(webhookHandler, resolutionEngine);
 
 // Middleware
 app.use(express.json());
@@ -21,7 +25,12 @@ app.use((req: Request, _res: Response, next: NextFunction) => {
 
 // Health check
 app.get("/health", (_req: Request, res: Response) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
+  res.json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    version: "2.0.0",
+    phase: 2,
+  });
 });
 
 // API routes
@@ -29,6 +38,7 @@ app.use("/v1/campaigns", campaignRoutes);
 app.use("/v1/pledges", pledgeRoutes);
 app.use("/v1/oracles", oracleRoutes);
 app.use("/v1/backers", backerRoutes);
+app.use("/v1/resolution", resolutionRoutes);
 
 // Error handler
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {

@@ -8,14 +8,15 @@ import "./interfaces/IOracleRegistry.sol";
 
 /**
  * @title OracleRegistry
- * @notice Manages oracle registration and attestations
- * @dev Phase 1 implementation with manual attestation only
+ * @notice Manages oracle registration, attestations, and API oracle data
+ * @dev Phase 2 implementation with API oracle support
  */
 contract OracleRegistry is IOracleRegistry, AccessControl {
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
 
     bytes32 public constant ORACLE_ADMIN_ROLE = keccak256("ORACLE_ADMIN_ROLE");
+    bytes32 public constant DATA_SUBMITTER_ROLE = keccak256("DATA_SUBMITTER_ROLE");
 
     /// @notice Mapping of oracle ID to oracle data
     mapping(bytes32 => Oracle) private oracles;
@@ -26,26 +27,56 @@ contract OracleRegistry is IOracleRegistry, AccessControl {
     /// @notice Mapping of campaign+milestone to attestation
     mapping(bytes32 => mapping(bytes32 => Attestation)) private attestations;
 
+    /// @notice Mapping of campaign+milestone to API oracle data hash
+    mapping(bytes32 => mapping(bytes32 => ApiOracleData)) private apiOracleData;
+
     /// @notice Nonce for generating unique oracle IDs
     uint256 private oracleNonce;
+
+    /// @notice API Oracle data structure
+    struct ApiOracleData {
+        bytes32 dataHash;           // Hash of the off-chain data
+        uint256 value;              // Primary numeric value (e.g., miles, seconds)
+        bool verified;              // Whether milestone condition was met
+        uint256 timestamp;          // When data was submitted
+        string dataUri;             // URI to full data (IPFS/Arweave)
+    }
+
+    /// @notice Emitted when API oracle data is submitted
+    event ApiDataSubmitted(
+        bytes32 indexed oracleId,
+        bytes32 indexed campaignId,
+        bytes32 indexed milestoneId,
+        bytes32 dataHash,
+        bool verified
+    );
+
+    /// @notice Emitted when an API oracle is registered
+    event ApiOracleRegistered(
+        bytes32 indexed oracleId,
+        string name,
+        string endpoint
+    );
 
     constructor() {
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ORACLE_ADMIN_ROLE, msg.sender);
+        _grantRole(DATA_SUBMITTER_ROLE, msg.sender);
     }
 
-    /// @notice Registers a new oracle
+    /// @notice Registers a new oracle (supports all types in Phase 2)
     function registerOracle(
         address attestor,
         string calldata name,
         OracleType oracleType
     ) external onlyRole(ORACLE_ADMIN_ROLE) returns (bytes32 oracleId) {
-        require(attestor != address(0), "Invalid attestor address");
         require(bytes(name).length > 0, "Name required");
-        require(attestorToOracle[attestor] == bytes32(0), "Attestor already registered");
 
-        // Phase 1: Only attestation oracles supported
-        require(oracleType == OracleType.Attestation, "Only attestation oracles in Phase 1");
+        // For attestation oracles, require valid attestor
+        if (oracleType == OracleType.Attestation) {
+            require(attestor != address(0), "Invalid attestor address");
+            require(attestorToOracle[attestor] == bytes32(0), "Attestor already registered");
+        }
 
         oracleId = keccak256(
             abi.encodePacked(
@@ -65,12 +96,94 @@ contract OracleRegistry is IOracleRegistry, AccessControl {
             createdAt: block.timestamp
         });
 
-        attestorToOracle[attestor] = oracleId;
+        if (oracleType == OracleType.Attestation && attestor != address(0)) {
+            attestorToOracle[attestor] = oracleId;
+        }
 
         emit OracleRegistered(oracleId, attestor, name, oracleType);
     }
 
-    /// @notice Submits an attestation
+    /// @notice Registers an API oracle with endpoint info
+    function registerApiOracle(
+        string calldata name,
+        string calldata endpoint
+    ) external onlyRole(ORACLE_ADMIN_ROLE) returns (bytes32 oracleId) {
+        require(bytes(name).length > 0, "Name required");
+        require(bytes(endpoint).length > 0, "Endpoint required");
+
+        oracleId = keccak256(
+            abi.encodePacked(
+                name,
+                endpoint,
+                block.timestamp,
+                oracleNonce++
+            )
+        );
+
+        oracles[oracleId] = Oracle({
+            oracleId: oracleId,
+            name: name,
+            oracleType: OracleType.API,
+            attestor: address(0),
+            active: true,
+            createdAt: block.timestamp
+        });
+
+        emit ApiOracleRegistered(oracleId, name, endpoint);
+        emit OracleRegistered(oracleId, address(0), name, OracleType.API);
+    }
+
+    /// @notice Submits API oracle data (called by off-chain oracle router)
+    function submitApiOracleData(
+        bytes32 oracleId,
+        bytes32 campaignId,
+        bytes32 milestoneId,
+        bytes32 dataHash,
+        uint256 value,
+        bool verified,
+        string calldata dataUri
+    ) external onlyRole(DATA_SUBMITTER_ROLE) {
+        Oracle storage oracle = oracles[oracleId];
+        require(oracle.createdAt > 0, "Oracle does not exist");
+        require(oracle.active, "Oracle not active");
+        require(oracle.oracleType == OracleType.API, "Not an API oracle");
+
+        // Allow update if data changed
+        apiOracleData[campaignId][milestoneId] = ApiOracleData({
+            dataHash: dataHash,
+            value: value,
+            verified: verified,
+            timestamp: block.timestamp,
+            dataUri: dataUri
+        });
+
+        emit ApiDataSubmitted(oracleId, campaignId, milestoneId, dataHash, verified);
+    }
+
+    /// @notice Gets API oracle data for a milestone
+    function getApiOracleData(
+        bytes32 campaignId,
+        bytes32 milestoneId
+    ) external view returns (
+        bytes32 dataHash,
+        uint256 value,
+        bool verified,
+        uint256 timestamp,
+        string memory dataUri
+    ) {
+        ApiOracleData storage data = apiOracleData[campaignId][milestoneId];
+        return (data.dataHash, data.value, data.verified, data.timestamp, data.dataUri);
+    }
+
+    /// @notice Checks if API data exists for a milestone
+    function hasApiData(
+        bytes32 campaignId,
+        bytes32 milestoneId
+    ) external view returns (bool) {
+        return apiOracleData[campaignId][milestoneId].timestamp > 0;
+    }
+
+    /// @notice Submits an attestation (Phase 1 compatible)
     function submitAttestation(
         bytes32 campaignId,
         bytes32 milestoneId,
@@ -138,13 +251,42 @@ contract OracleRegistry is IOracleRegistry, AccessControl {
         return attestations[campaignId][milestoneId].timestamp > 0;
     }
 
-    /// @notice Gets milestone completion status
+    /// @notice Gets milestone completion status (checks both attestation and API data)
     function getMilestoneStatus(
         bytes32 campaignId,
         bytes32 milestoneId
     ) external view returns (bool completed, uint256 value) {
+        // Check attestation first
         Attestation storage att = attestations[campaignId][milestoneId];
-        return (att.completed, att.value);
+        if (att.timestamp > 0) {
+            return (att.completed, att.value);
+        }
+
+        // Check API oracle data
+        ApiOracleData storage apiData = apiOracleData[campaignId][milestoneId];
+        if (apiData.timestamp > 0) {
+            return (apiData.verified, apiData.value);
+        }
+
+        return (false, 0);
+    }
+
+    /// @notice Checks if milestone is verified (either attestation or API)
+    function isMilestoneVerified(
+        bytes32 campaignId,
+        bytes32 milestoneId
+    ) external view returns (bool) {
+        // Check attestation
+        if (attestations[campaignId][milestoneId].completed) {
+            return true;
+        }
+
+        // Check API data
+        if (apiOracleData[campaignId][milestoneId].verified) {
+            return true;
+        }
+
+        return false;
     }
 
     /// @notice Gets oracle data
@@ -188,5 +330,52 @@ contract OracleRegistry is IOracleRegistry, AccessControl {
     /// @notice Grants oracle admin role
     function grantOracleAdminRole(address account) external onlyRole(DEFAULT_ADMIN_ROLE) {
         _grantRole(ORACLE_ADMIN_ROLE, account);
+    }
+
+    /// @notice Grants data submitter role (for oracle router)
+    function grantDataSubmitterRole(address account) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _grantRole(DATA_SUBMITTER_ROLE, account);
+    }
+
+    /// @notice Batch submit API oracle data for multiple milestones
+    function batchSubmitApiData(
+        bytes32 oracleId,
+        bytes32 campaignId,
+        bytes32[] calldata milestoneIds,
+        bytes32[] calldata dataHashes,
+        uint256[] calldata values,
+        bool[] calldata verifiedFlags,
+        string[] calldata dataUris
+    ) external onlyRole(DATA_SUBMITTER_ROLE) {
+        require(
+            milestoneIds.length == dataHashes.length &&
+            milestoneIds.length == values.length &&
+            milestoneIds.length == verifiedFlags.length &&
+            milestoneIds.length == dataUris.length,
+            "Array length mismatch"
+        );
+
+        Oracle storage oracle = oracles[oracleId];
+        require(oracle.createdAt > 0, "Oracle does not exist");
+        require(oracle.active, "Oracle not active");
+        require(oracle.oracleType == OracleType.API, "Not an API oracle");
+
+        for (uint256 i = 0; i < milestoneIds.length; i++) {
+            apiOracleData[campaignId][milestoneIds[i]] = ApiOracleData({
+                dataHash: dataHashes[i],
+                value: values[i],
+                verified: verifiedFlags[i],
+                timestamp: block.timestamp,
+                dataUri: dataUris[i]
+            });
+
+            emit ApiDataSubmitted(
+                oracleId,
+                campaignId,
+                milestoneIds[i],
+                dataHashes[i],
+                verifiedFlags[i]
+            );
+        }
     }
 }
