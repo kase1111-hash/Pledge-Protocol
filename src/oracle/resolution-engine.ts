@@ -30,6 +30,33 @@ interface CampaignForResolution {
 }
 
 /**
+ * Tier definition for tiered pledges
+ */
+interface Tier {
+  threshold: number;  // Units at which this tier starts
+  rate: bigint;       // Rate per unit in this tier (in wei)
+}
+
+/**
+ * Calculation parameters for advanced pledges
+ */
+interface CalculationParams {
+  // Per-unit parameters
+  perUnitAmount?: string;
+  unitField?: string;
+  cap?: string;
+
+  // Tiered parameters
+  tiers?: Tier[];
+
+  // Conditional parameters
+  conditionField?: string;
+  conditionOperator?: "exists" | "eq" | "gt" | "gte" | "lt" | "lte" | "between";
+  conditionValue?: number;
+  conditionValueEnd?: number;
+}
+
+/**
  * Pledge for resolution
  */
 interface PledgeForResolution {
@@ -38,12 +65,12 @@ interface PledgeForResolution {
   backer: string;
   escrowedAmount: bigint;
   pledgeType: "flat" | "per_unit" | "tiered" | "conditional";
-  calculationParams?: Record<string, any>;
+  calculationParams?: CalculationParams;
 }
 
 /**
  * Resolution Engine
- * Handles automated campaign resolution based on oracle data
+ * Phase 4: Handles automated campaign resolution with all pledge types
  */
 export class ResolutionEngine extends EventEmitter {
   private jobs: Map<string, ResolutionJob> = new Map();
@@ -191,9 +218,36 @@ export class ResolutionEngine extends EventEmitter {
   }
 
   /**
-   * Calculate pledge amounts based on milestone results
+   * Calculate pledge amounts based on milestone results and pledge type
    */
   private calculatePledgeAmounts(
+    pledge: PledgeForResolution,
+    milestoneResults: VerificationResult[],
+    milestones: CampaignMilestone[]
+  ): { releaseAmount: bigint; refundAmount: bigint } {
+    switch (pledge.pledgeType) {
+      case "flat":
+        return this.calculateFlatPledge(pledge, milestoneResults, milestones);
+
+      case "per_unit":
+        return this.calculatePerUnitPledge(pledge, milestoneResults);
+
+      case "tiered":
+        return this.calculateTieredPledge(pledge, milestoneResults);
+
+      case "conditional":
+        return this.calculateConditionalPledge(pledge, milestoneResults);
+
+      default:
+        // Unknown pledge type - refund all
+        return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
+    }
+  }
+
+  /**
+   * Calculate flat pledge amounts (proportional to milestone completion)
+   */
+  private calculateFlatPledge(
     pledge: PledgeForResolution,
     milestoneResults: VerificationResult[],
     milestones: CampaignMilestone[]
@@ -207,58 +261,268 @@ export class ResolutionEngine extends EventEmitter {
       }
     }
 
-    // For flat pledges, release proportional to milestones completed
-    if (pledge.pledgeType === "flat") {
-      const releaseAmount =
-        (pledge.escrowedAmount * BigInt(verifiedPercentage)) / BigInt(100);
-      const refundAmount = pledge.escrowedAmount - releaseAmount;
+    // Release proportional to milestones completed
+    const releaseAmount =
+      (pledge.escrowedAmount * BigInt(verifiedPercentage)) / BigInt(100);
+    const refundAmount = pledge.escrowedAmount - releaseAmount;
 
-      return { releaseAmount, refundAmount };
-    }
+    return { releaseAmount, refundAmount };
+  }
 
-    // For per-unit pledges, calculate based on oracle value
-    if (pledge.pledgeType === "per_unit" && pledge.calculationParams) {
-      const { perUnitAmount, unitField, cap } = pledge.calculationParams;
+  /**
+   * Calculate per-unit pledge amounts
+   * Formula: min(units * perUnitAmount, cap, escrowedAmount)
+   */
+  private calculatePerUnitPledge(
+    pledge: PledgeForResolution,
+    milestoneResults: VerificationResult[]
+  ): { releaseAmount: bigint; refundAmount: bigint } {
+    const params = pledge.calculationParams;
 
-      // Find the oracle result that has the unit field
-      const unitResult = milestoneResults.find(
-        (r) => r.oracleData && r.oracleData[unitField] !== undefined
-      );
-
-      if (unitResult && unitResult.verified) {
-        const units = BigInt(Math.floor(unitResult.oracleData[unitField]));
-        let calculated = units * BigInt(perUnitAmount);
-
-        // Apply cap
-        if (cap) {
-          const capAmount = BigInt(cap);
-          if (calculated > capAmount) {
-            calculated = capAmount;
-          }
-        }
-
-        // Can't release more than escrowed
-        const releaseAmount =
-          calculated > pledge.escrowedAmount
-            ? pledge.escrowedAmount
-            : calculated;
-
-        return {
-          releaseAmount,
-          refundAmount: pledge.escrowedAmount - releaseAmount,
-        };
-      }
-
-      // No valid unit data - refund all
+    if (!params?.perUnitAmount || !params?.unitField) {
+      // Missing required params - refund all
       return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
     }
 
-    // Default: full release if all milestones verified, else full refund
-    if (verifiedPercentage === 100) {
-      return { releaseAmount: pledge.escrowedAmount, refundAmount: BigInt(0) };
+    // Find the oracle result that has the unit field
+    const unitResult = this.findOracleDataWithField(milestoneResults, params.unitField);
+
+    if (!unitResult || !unitResult.verified) {
+      // No valid unit data or milestone not verified - refund all
+      return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
     }
 
-    return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
+    // Extract units from oracle data
+    const units = this.extractFieldValue(unitResult.oracleData, params.unitField);
+    if (units === null || units < 0) {
+      return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
+    }
+
+    // Calculate based on units
+    const perUnitAmount = BigInt(params.perUnitAmount);
+    let calculated = BigInt(Math.floor(units)) * perUnitAmount;
+
+    // Apply cap if specified
+    if (params.cap) {
+      const capAmount = BigInt(params.cap);
+      if (calculated > capAmount) {
+        calculated = capAmount;
+      }
+    }
+
+    // Can't release more than escrowed
+    const releaseAmount = calculated > pledge.escrowedAmount
+      ? pledge.escrowedAmount
+      : calculated;
+
+    return {
+      releaseAmount,
+      refundAmount: pledge.escrowedAmount - releaseAmount,
+    };
+  }
+
+  /**
+   * Calculate tiered pledge amounts
+   * Applies stepped rates based on unit thresholds
+   */
+  private calculateTieredPledge(
+    pledge: PledgeForResolution,
+    milestoneResults: VerificationResult[]
+  ): { releaseAmount: bigint; refundAmount: bigint } {
+    const params = pledge.calculationParams;
+
+    if (!params?.tiers || params.tiers.length === 0 || !params.unitField) {
+      // Missing required params - refund all
+      return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
+    }
+
+    // Find the oracle result that has the unit field
+    const unitResult = this.findOracleDataWithField(milestoneResults, params.unitField);
+
+    if (!unitResult || !unitResult.verified) {
+      // No valid unit data or milestone not verified - refund all
+      return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
+    }
+
+    // Extract units from oracle data
+    const totalUnits = this.extractFieldValue(unitResult.oracleData, params.unitField);
+    if (totalUnits === null || totalUnits < 0) {
+      return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
+    }
+
+    // Sort tiers by threshold (ascending)
+    const sortedTiers = [...params.tiers].sort((a, b) => a.threshold - b.threshold);
+
+    // Calculate amount using tiered rates
+    let calculated = BigInt(0);
+    let unitsProcessed = 0;
+
+    for (let i = 0; i < sortedTiers.length; i++) {
+      const tier = sortedTiers[i];
+      const nextThreshold = sortedTiers[i + 1]?.threshold ?? Infinity;
+
+      // Units in this tier
+      const tierStart = Math.max(tier.threshold, unitsProcessed);
+      const tierEnd = Math.min(totalUnits, nextThreshold);
+
+      if (tierEnd <= tierStart) {
+        continue;
+      }
+
+      const unitsInTier = tierEnd - tierStart;
+      calculated += BigInt(Math.floor(unitsInTier)) * tier.rate;
+      unitsProcessed = tierEnd;
+
+      if (unitsProcessed >= totalUnits) {
+        break;
+      }
+    }
+
+    // Apply cap if specified
+    if (params.cap) {
+      const capAmount = BigInt(params.cap);
+      if (calculated > capAmount) {
+        calculated = capAmount;
+      }
+    }
+
+    // Can't release more than escrowed
+    const releaseAmount = calculated > pledge.escrowedAmount
+      ? pledge.escrowedAmount
+      : calculated;
+
+    return {
+      releaseAmount,
+      refundAmount: pledge.escrowedAmount - releaseAmount,
+    };
+  }
+
+  /**
+   * Calculate conditional pledge amounts
+   * All-or-nothing based on condition evaluation
+   */
+  private calculateConditionalPledge(
+    pledge: PledgeForResolution,
+    milestoneResults: VerificationResult[]
+  ): { releaseAmount: bigint; refundAmount: bigint } {
+    const params = pledge.calculationParams;
+
+    if (!params?.conditionField || !params?.conditionOperator) {
+      // Missing required params - refund all
+      return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
+    }
+
+    // Find the oracle result that has the condition field
+    const conditionResult = this.findOracleDataWithField(
+      milestoneResults,
+      params.conditionField
+    );
+
+    if (!conditionResult || !conditionResult.verified) {
+      // No valid data or milestone not verified - refund all
+      return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
+    }
+
+    // Evaluate the condition
+    const conditionMet = this.evaluateCondition(
+      conditionResult.oracleData,
+      params.conditionField,
+      params.conditionOperator,
+      params.conditionValue,
+      params.conditionValueEnd
+    );
+
+    if (conditionMet) {
+      // Condition met - release full amount
+      return { releaseAmount: pledge.escrowedAmount, refundAmount: BigInt(0) };
+    } else {
+      // Condition not met - refund all
+      return { releaseAmount: BigInt(0), refundAmount: pledge.escrowedAmount };
+    }
+  }
+
+  /**
+   * Find oracle result containing a specific field
+   */
+  private findOracleDataWithField(
+    results: VerificationResult[],
+    field: string
+  ): VerificationResult | undefined {
+    return results.find((r) => {
+      if (!r.oracleData) return false;
+      return this.extractFieldValue(r.oracleData, field) !== null;
+    });
+  }
+
+  /**
+   * Extract a field value from oracle data (supports nested paths)
+   */
+  private extractFieldValue(data: any, field: string): number | null {
+    if (!data || !field) return null;
+
+    const parts = field.split(".");
+    let value = data;
+
+    for (const part of parts) {
+      if (value === null || value === undefined) return null;
+      value = value[part];
+    }
+
+    if (typeof value === "number") {
+      return value;
+    }
+
+    if (typeof value === "string") {
+      const parsed = parseFloat(value);
+      return isNaN(parsed) ? null : parsed;
+    }
+
+    return null;
+  }
+
+  /**
+   * Evaluate a condition against oracle data
+   */
+  private evaluateCondition(
+    data: any,
+    field: string,
+    operator: string,
+    value?: number,
+    valueEnd?: number
+  ): boolean {
+    const fieldValue = this.extractFieldValue(data, field);
+
+    switch (operator) {
+      case "exists":
+        return fieldValue !== null;
+
+      case "eq":
+        return fieldValue !== null && value !== undefined && fieldValue === value;
+
+      case "gt":
+        return fieldValue !== null && value !== undefined && fieldValue > value;
+
+      case "gte":
+        return fieldValue !== null && value !== undefined && fieldValue >= value;
+
+      case "lt":
+        return fieldValue !== null && value !== undefined && fieldValue < value;
+
+      case "lte":
+        return fieldValue !== null && value !== undefined && fieldValue <= value;
+
+      case "between":
+        return (
+          fieldValue !== null &&
+          value !== undefined &&
+          valueEnd !== undefined &&
+          fieldValue >= value &&
+          fieldValue <= valueEnd
+        );
+
+      default:
+        return false;
+    }
   }
 
   /**
@@ -277,7 +541,7 @@ export class ResolutionEngine extends EventEmitter {
           pledge.id,
           pledge.backer,
           campaign.id,
-          this.generateOutcomeSummary(milestoneResults)
+          this.generateOutcomeSummary(milestoneResults, pledge)
         );
         minted++;
       } catch (error) {
@@ -291,7 +555,10 @@ export class ResolutionEngine extends EventEmitter {
   /**
    * Generate outcome summary for commemorative
    */
-  private generateOutcomeSummary(results: VerificationResult[]): string {
+  private generateOutcomeSummary(
+    results: VerificationResult[],
+    pledge?: PledgeForResolution
+  ): string {
     const verifiedCount = results.filter((r) => r.verified).length;
 
     if (verifiedCount === results.length) {
@@ -300,15 +567,30 @@ export class ResolutionEngine extends EventEmitter {
       if (firstResult?.oracleData) {
         const data = firstResult.oracleData;
 
-        // Race result
+        // Race result with pledge-specific data
         if (data.distanceMiles && data.timeSeconds) {
           const time = this.formatTime(data.timeSeconds);
-          return `${data.distanceMiles} miles in ${time}`;
+          const summary = `${data.distanceMiles} miles in ${time}`;
+
+          // Add per-unit context if applicable
+          if (pledge?.pledgeType === "per_unit" && pledge.calculationParams?.unitField) {
+            const units = this.extractFieldValue(data, pledge.calculationParams.unitField);
+            if (units !== null) {
+              return `${summary} (${units} ${pledge.calculationParams.unitField})`;
+            }
+          }
+
+          return summary;
         }
 
         // PR merged
         if (data.prMerged !== undefined) {
           return data.prMerged ? "PR merged successfully" : "PR not merged";
+        }
+
+        // Academic completion
+        if (data.degreeConferred) {
+          return `Degree conferred: ${data.degreeConferred}`;
         }
       }
 
@@ -378,6 +660,52 @@ export class ResolutionEngine extends EventEmitter {
     return Array.from(this.jobs.values()).filter(
       (job) => job.campaignId === campaignId
     );
+  }
+
+  /**
+   * Dry-run calculation for a pledge (testing/preview)
+   */
+  calculatePledgePreview(
+    pledge: PledgeForResolution,
+    oracleData: any,
+    milestones: CampaignMilestone[]
+  ): { releaseAmount: bigint; refundAmount: bigint; breakdown: string } {
+    // Create mock milestone results
+    const mockResults: VerificationResult[] = milestones.map((m) => ({
+      milestoneId: m.id,
+      campaignId: pledge.campaignId,
+      verified: true,
+      oracleData: oracleData,
+      evaluatedCondition: m.condition,
+      timestamp: Date.now(),
+    }));
+
+    const { releaseAmount, refundAmount } = this.calculatePledgeAmounts(
+      pledge,
+      mockResults,
+      milestones
+    );
+
+    // Generate breakdown description
+    let breakdown: string;
+    switch (pledge.pledgeType) {
+      case "per_unit":
+        const units = pledge.calculationParams?.unitField
+          ? this.extractFieldValue(oracleData, pledge.calculationParams.unitField)
+          : null;
+        breakdown = `Per-unit: ${units ?? 0} units × ${pledge.calculationParams?.perUnitAmount ?? 0} = ${releaseAmount.toString()}`;
+        break;
+      case "tiered":
+        breakdown = `Tiered calculation based on ${pledge.calculationParams?.tiers?.length ?? 0} tiers`;
+        break;
+      case "conditional":
+        breakdown = `Conditional: ${releaseAmount > 0 ? "condition met" : "condition not met"}`;
+        break;
+      default:
+        breakdown = `Flat: ${releaseAmount.toString()} released`;
+    }
+
+    return { releaseAmount, refundAmount, breakdown };
   }
 
   /**

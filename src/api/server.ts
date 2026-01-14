@@ -29,8 +29,8 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    version: "3.0.0",
-    phase: 3,
+    version: "4.0.0",
+    phase: 4,
   });
 });
 

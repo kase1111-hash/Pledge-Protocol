@@ -59,20 +59,55 @@ interface MilestoneCondition {
   value: any;
 }
 
+// Tier for tiered pledges (Phase 4)
+interface Tier {
+  threshold: number;
+  rate: string;
+}
+
+// Condition for conditional pledges (Phase 4)
+interface PledgeCondition {
+  field: string;
+  operator: "exists" | "eq" | "gt" | "gte" | "lt" | "lte" | "between";
+  value?: number;
+  valueEnd?: number;
+}
+
 interface PledgeType {
   id: string;
   name: string;
   description: string;
   calculationType: "flat" | "per_unit" | "tiered" | "conditional";
   baseAmount: string | null;
+  // Per-unit fields
   perUnitAmount: string | null;
+  unitField: string | null;
   cap: string | null;
+  // Tiered fields (Phase 4)
+  tiers: Tier[] | null;
+  // Conditional fields (Phase 4)
+  condition: PledgeCondition | null;
+  // Common fields
   minimum: string;
   maximum: string | null;
   enabled: boolean;
 }
 
 type CampaignStatus = "draft" | "active" | "pledging_closed" | "resolved" | "expired" | "cancelled";
+
+// Tier schema for tiered pledges
+const tierSchema = z.object({
+  threshold: z.number().min(0),
+  rate: z.string(),
+});
+
+// Condition schema for conditional pledges
+const conditionSchema = z.object({
+  field: z.string().min(1),
+  operator: z.enum(["exists", "eq", "gt", "gte", "lt", "lte", "between"]),
+  value: z.number().optional(),
+  valueEnd: z.number().optional(),
+});
 
 // Validation schemas
 const createCampaignSchema = z.object({
@@ -106,8 +141,15 @@ const createCampaignSchema = z.object({
     description: z.string(),
     calculationType: z.enum(["flat", "per_unit", "tiered", "conditional"]),
     baseAmount: z.string().nullable().optional(),
+    // Per-unit fields
     perUnitAmount: z.string().nullable().optional(),
+    unitField: z.string().nullable().optional(),
     cap: z.string().nullable().optional(),
+    // Tiered fields (Phase 4)
+    tiers: z.array(tierSchema).nullable().optional(),
+    // Conditional fields (Phase 4)
+    condition: conditionSchema.nullable().optional(),
+    // Common fields
     minimum: z.string(),
     maximum: z.string().nullable().optional(),
   })),
@@ -115,6 +157,62 @@ const createCampaignSchema = z.object({
   maximumPledge: z.string().nullable().optional(),
   visibility: z.enum(["public", "semi-private", "private"]).optional(),
 });
+
+/**
+ * Validate pledge type configuration based on calculation type
+ */
+function validatePledgeTypeConfig(pledgeType: any): { valid: boolean; error?: string } {
+  switch (pledgeType.calculationType) {
+    case "flat":
+      // Flat pledges need a base amount or just minimum
+      return { valid: true };
+
+    case "per_unit":
+      if (!pledgeType.perUnitAmount) {
+        return { valid: false, error: `Per-unit pledge "${pledgeType.name}" requires perUnitAmount` };
+      }
+      if (!pledgeType.unitField) {
+        return { valid: false, error: `Per-unit pledge "${pledgeType.name}" requires unitField` };
+      }
+      return { valid: true };
+
+    case "tiered":
+      if (!pledgeType.tiers || pledgeType.tiers.length === 0) {
+        return { valid: false, error: `Tiered pledge "${pledgeType.name}" requires at least one tier` };
+      }
+      if (!pledgeType.unitField) {
+        return { valid: false, error: `Tiered pledge "${pledgeType.name}" requires unitField` };
+      }
+      // Validate tiers are sorted and have valid thresholds
+      const tiers = pledgeType.tiers as Tier[];
+      for (let i = 1; i < tiers.length; i++) {
+        if (tiers[i].threshold <= tiers[i - 1].threshold) {
+          return { valid: false, error: `Tiered pledge "${pledgeType.name}" tiers must have ascending thresholds` };
+        }
+      }
+      return { valid: true };
+
+    case "conditional":
+      if (!pledgeType.condition) {
+        return { valid: false, error: `Conditional pledge "${pledgeType.name}" requires condition` };
+      }
+      const cond = pledgeType.condition as PledgeCondition;
+      if (!cond.field) {
+        return { valid: false, error: `Conditional pledge "${pledgeType.name}" condition requires field` };
+      }
+      // Validate value is provided for operators that need it
+      if (cond.operator !== "exists" && cond.value === undefined) {
+        return { valid: false, error: `Conditional pledge "${pledgeType.name}" condition requires value for ${cond.operator} operator` };
+      }
+      if (cond.operator === "between" && cond.valueEnd === undefined) {
+        return { valid: false, error: `Conditional pledge "${pledgeType.name}" condition requires valueEnd for between operator` };
+      }
+      return { valid: true };
+
+    default:
+      return { valid: false, error: `Unknown calculation type: ${pledgeType.calculationType}` };
+  }
+}
 
 // Create campaign
 router.post("/", async (req: Request, res: Response) => {
@@ -154,6 +252,19 @@ router.post("/", async (req: Request, res: Response) => {
       });
     }
 
+    // Validate pledge type configurations (Phase 4)
+    for (const pledgeType of body.pledgeTypes) {
+      const validation = validatePledgeTypeConfig(pledgeType);
+      if (!validation.valid) {
+        return res.status(422).json({
+          error: {
+            code: "VALIDATION_ERROR",
+            message: validation.error,
+          },
+        });
+      }
+    }
+
     const id = `campaign_${uuidv4().slice(0, 8)}`;
     const now = Math.floor(Date.now() / 1000);
 
@@ -180,7 +291,10 @@ router.post("/", async (req: Request, res: Response) => {
         id: `pt_${i}`,
         baseAmount: pt.baseAmount || null,
         perUnitAmount: pt.perUnitAmount || null,
+        unitField: pt.unitField || null,
         cap: pt.cap || null,
+        tiers: pt.tiers || null,
+        condition: pt.condition || null,
         maximum: pt.maximum || null,
         enabled: true,
       })),
@@ -360,6 +474,47 @@ router.get("/:id/stats", (req: Request, res: Response) => {
     pledgeCount: campaign.pledgeCount,
     milestonesCompleted: campaign.milestones.filter((m) => m.status === "verified").length,
     milestonesTotal: campaign.milestones.length,
+  });
+});
+
+// Get pledge types summary (Phase 4)
+router.get("/:id/pledge-types", (req: Request, res: Response) => {
+  const campaign = campaigns.get(req.params.id);
+
+  if (!campaign) {
+    return res.status(404).json({
+      error: {
+        code: "CAMPAIGN_NOT_FOUND",
+        message: `Campaign with ID ${req.params.id} does not exist`,
+      },
+    });
+  }
+
+  res.json({
+    campaignId: campaign.id,
+    pledgeTypes: campaign.pledgeTypes.map(pt => ({
+      id: pt.id,
+      name: pt.name,
+      description: pt.description,
+      calculationType: pt.calculationType,
+      minimum: pt.minimum,
+      maximum: pt.maximum,
+      enabled: pt.enabled,
+      // Type-specific details
+      ...(pt.calculationType === "per_unit" && {
+        perUnitAmount: pt.perUnitAmount,
+        unitField: pt.unitField,
+        cap: pt.cap,
+      }),
+      ...(pt.calculationType === "tiered" && {
+        unitField: pt.unitField,
+        tiers: pt.tiers,
+        cap: pt.cap,
+      }),
+      ...(pt.calculationType === "conditional" && {
+        condition: pt.condition,
+      }),
+    })),
   });
 });
 
