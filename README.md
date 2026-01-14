@@ -302,6 +302,319 @@ Supported operators:
 
 Example: Release $50 if finish time is under 4 hours (14400 seconds).
 
+### Extended Oracle Providers (Phase 5)
+
+Phase 5 adds additional oracle integrations for broader use cases.
+
+#### Strava Integration
+
+Fitness activity verification via Strava:
+
+```typescript
+import { StravaProvider } from "./oracle";
+
+const strava = StravaProvider.create(clientId, clientSecret);
+strava.setTokens(accessToken, refreshToken, expiresAt);
+
+// Query specific activity
+const result = await strava.queryActivity("12345");
+
+// Query athlete's activities
+const activities = await strava.queryActivities(afterTimestamp, beforeTimestamp);
+```
+
+Response fields: `activityId`, `activityType`, `distanceMeters`, `distanceMiles`, `elapsedTimeSeconds`, `movingTimeSeconds`, `totalElevationGainMeters`, `averageSpeedMps`
+
+#### Academic Verification
+
+Education milestone verification (enrollment, graduation, GPA):
+
+```typescript
+import { AcademicProvider } from "./oracle";
+
+const academic = AcademicProvider.createForProvider("nsc", apiKey);
+
+// Verify enrollment
+const enrollment = await academic.verifyEnrollment(studentId, institutionCode);
+
+// Verify degree
+const degree = await academic.verifyDegree(studentId, institutionCode);
+```
+
+Response fields: `enrolled`, `creditsCompleted`, `gpa`, `graduationDate`, `degreeConferred`, `enrollmentStatus`
+
+#### Streaming Platforms
+
+Content release verification (Spotify, YouTube, Twitch):
+
+```typescript
+import { StreamingProvider } from "./oracle";
+
+const spotify = StreamingProvider.createForPlatform("spotify", apiKey);
+const result = await spotify.verifySpotifyRelease(albumId);
+
+const youtube = StreamingProvider.createForPlatform("youtube", apiKey);
+const video = await youtube.verifyYouTubeVideo(videoId);
+```
+
+#### Aggregator Oracle
+
+Multi-source consensus for high-value campaigns:
+
+```typescript
+import { AggregatorProvider, RaceTimingProvider, StravaProvider } from "./oracle";
+
+// Create sources
+const athlinks = RaceTimingProvider.createForProvider("athlinks", apiKey);
+const strava = StravaProvider.create(clientId, clientSecret);
+
+// Create aggregator requiring majority consensus
+const aggregator = AggregatorProvider.createMajority(
+  "marathon-verification",
+  "Marathon Multi-Source",
+  [athlinks, strava],
+  0.5 // 50% threshold
+);
+
+const result = await aggregator.query({ eventId, bibNumber });
+```
+
+Aggregation methods:
+- `all`: All sources must agree
+- `majority`: More than threshold percentage must agree
+- `any`: At least one source must succeed
+- `weighted`: Weighted voting by source trust level
+- `threshold`: At least N sources must agree
+
+### Dispute Resolution API (Phase 6)
+
+Handle disagreements with a multi-tier resolution system:
+
+```bash
+# Create a dispute
+POST /v1/disputes
+{
+  "campaignId": "campaign_123",
+  "pledgeId": "pledge_456",
+  "milestoneId": "milestone_789",
+  "category": "oracle_disagreement",
+  "title": "Oracle data mismatch",
+  "description": "The oracle reported incorrect race results"
+}
+
+# List disputes
+GET /v1/disputes?campaignId=campaign_123&status=pending
+
+# Get dispute details
+GET /v1/disputes/:disputeId
+
+# Submit evidence
+POST /v1/disputes/:disputeId/evidence
+{
+  "type": "document",
+  "description": "Screenshot of official results",
+  "content": "https://evidence.example.com/screenshot.png"
+}
+
+# Open voting
+POST /v1/disputes/:disputeId/voting/open
+{
+  "eligibleVoters": ["0x...", "0x..."],
+  "votingPowers": { "0x...": "100", "0x...": "200" }
+}
+
+# Cast vote
+POST /v1/disputes/:disputeId/voting/cast
+{
+  "voter": "0x...",
+  "vote": "release",
+  "rationale": "Evidence clearly shows milestone was met"
+}
+
+# Close voting
+POST /v1/disputes/:disputeId/voting/close
+
+# Escalate dispute
+POST /v1/disputes/:disputeId/escalate
+{ "reason": "Community vote was inconclusive" }
+
+# Resolve dispute
+POST /v1/disputes/:disputeId/resolve
+{
+  "outcome": "release",
+  "rationale": "Creator fulfilled obligations"
+}
+
+# Appeal resolution
+POST /v1/disputes/:disputeId/appeal
+{ "reason": "New evidence discovered" }
+```
+
+#### Dispute Categories
+
+- `oracle_disagreement`: Oracle data conflicts with reality
+- `oracle_failure`: Oracle did not respond or returned errors
+- `milestone_dispute`: Disagreement about milestone completion
+- `calculation_error`: Pledge amount calculated incorrectly
+- `fraud_claim`: Suspected fraudulent activity
+- `technical_issue`: Smart contract or platform bug
+- `other`: Other issues
+
+#### Resolution Tiers
+
+| Tier | Description |
+|------|-------------|
+| `automated` | Technical issues resolved by system |
+| `community` | Community voting for standard disputes |
+| `creator` | Creator mediation for complex cases |
+| `council` | Expert panel for fraud and high-value disputes |
+
+### Webhooks API (Phase 6)
+
+Receive real-time notifications about campaign events:
+
+```bash
+# Create webhook
+POST /v1/webhooks
+{
+  "name": "Campaign Updates",
+  "url": "https://myapp.com/webhook",
+  "events": ["campaign_created", "pledge_released", "milestone_verified"],
+  "secret": "my-webhook-secret-key"
+}
+
+# List webhooks
+GET /v1/webhooks
+
+# Get available events
+GET /v1/webhooks/events
+
+# Update webhook
+PUT /v1/webhooks/:webhookId
+{
+  "events": ["campaign_created", "pledge_released"],
+  "active": true
+}
+
+# Test webhook
+POST /v1/webhooks/:webhookId/test
+
+# Get delivery logs
+GET /v1/webhooks/:webhookId/logs
+
+# Delete webhook
+DELETE /v1/webhooks/:webhookId
+```
+
+#### Event Types
+
+| Category | Events |
+|----------|--------|
+| Campaign | `campaign_created`, `campaign_activated`, `campaign_deadline_approaching`, `campaign_resolved`, `campaign_cancelled` |
+| Pledge | `pledge_created`, `pledge_escrowed`, `pledge_released`, `pledge_refunded`, `pledge_cancelled` |
+| Milestone | `milestone_verified`, `milestone_failed`, `milestone_pending` |
+| Oracle | `oracle_data_received`, `oracle_timeout`, `oracle_disagreement` |
+| Dispute | `dispute_created`, `dispute_evidence_added`, `dispute_voting_opened`, `dispute_resolved` |
+| Commemorative | `commemorative_generated`, `commemorative_minted` |
+
+### Search & Discovery API (Phase 6)
+
+Find and explore campaigns:
+
+```bash
+# Search campaigns
+GET /v1/analytics/search?q=marathon&category=fitness&status=active&sort=trendingScore
+
+# Get trending campaigns
+GET /v1/analytics/platform/trending
+
+# Get similar campaigns
+GET /v1/analytics/campaigns/:campaignId/similar
+
+# Platform overview
+GET /v1/analytics/platform/overview
+```
+
+#### Search Filters
+
+- `q`: Text search in name, description, tags
+- `category`: Filter by category (fitness, education, creative, etc.)
+- `status`: Filter by status (active, resolved, cancelled)
+- `oracleType`: Filter by oracle type
+- `tags`: Filter by tags (comma-separated)
+- `minPledged`, `maxPledged`: Filter by pledged amount
+- `minBackers`: Filter by minimum backer count
+- `sort`: Sort field (trendingScore, totalPledged, backerCount, createdAt)
+- `order`: Sort order (asc, desc)
+
+### Analytics Dashboard API (Phase 6)
+
+Analytics for creators and backers:
+
+```bash
+# Creator dashboard
+GET /v1/analytics/creators/:address/dashboard
+
+# Creator campaign analytics
+GET /v1/analytics/creators/:address/campaigns
+
+# Creator performance over time
+GET /v1/analytics/creators/:address/performance
+
+# Backer dashboard
+GET /v1/analytics/backers/:address/dashboard
+
+# Backer portfolio
+GET /v1/analytics/backers/:address/portfolio
+```
+
+### Campaign Templates API (Phase 5)
+
+Pre-built templates for common campaign types accelerate setup.
+
+```bash
+# List all templates
+GET /v1/templates
+
+# Get templates by category
+GET /v1/templates?category=fitness
+
+# Get template details
+GET /v1/templates/charity-race
+
+# Validate field values
+POST /v1/templates/:templateId/validate
+{ "fieldValues": { "eventName": "Portland Marathon", ... } }
+
+# Preview campaign without creating
+POST /v1/templates/:templateId/preview
+{ "fieldValues": { ... } }
+
+# Generate campaign from template
+POST /v1/templates/:templateId/generate
+{
+  "fieldValues": {
+    "eventName": "Portland Marathon 2026",
+    "participantName": "Sarah Chen",
+    "beneficiaryAddress": "0x...",
+    "eventDate": "2026-04-06",
+    "eventDistance": 26.2,
+    "timingProvider": "athlinks"
+  }
+}
+```
+
+#### Available Templates
+
+| Template | Category | Description |
+|----------|----------|-------------|
+| `charity-race` | fitness | Marathon/race fundraising with per-mile pledges |
+| `creative-project` | creative | Album/book/film with milestone releases |
+| `academic-achievement` | education | Student funding with enrollment verification |
+| `open-source-dev` | opensource | GitHub-verified development bounties |
+| `business-launch` | business | Small business from permits to opening |
+| `research-study` | research | Scientific research to publication |
+
 ### Commemoratives API (Phase 3)
 
 Generate and manage commemorative tokens:
@@ -367,6 +680,8 @@ Images and metadata are stored permanently:
 - **Phase 2** ✅: Oracle framework (API oracles, race timing, GitHub, resolution engine)
 - **Phase 3** ✅: Token system (commemoratives, image generation, IPFS/Arweave)
 - **Phase 4** ✅: Advanced pledges (per-unit, tiered, conditional calculation types)
+- **Phase 5** ✅: Ecosystem (Strava/Academic/Streaming oracles, aggregator, templates)
+- **Phase 6** ✅: Governance (dispute resolution, webhooks, search/discovery, analytics)
 
 ### Running Locally
 
@@ -396,12 +711,41 @@ contracts/           # Solidity smart contracts
 src/
 ├── api/             # Express API server
 │   └── routes/
-├── oracle/          # Oracle system (Phase 2)
+│       ├── campaigns.ts
+│       ├── pledges.ts
+│       ├── oracles.ts
+│       ├── commemoratives.ts
+│       ├── templates.ts        # Phase 5
+│       ├── disputes.ts         # Phase 6
+│       ├── webhooks.ts         # Phase 6
+│       └── analytics.ts        # Phase 6
+├── oracle/          # Oracle system (Phase 2 + 5)
+│   ├── providers/
+│   │   ├── api-provider.ts
+│   │   ├── race-timing-provider.ts
+│   │   ├── github-provider.ts
+│   │   ├── strava-provider.ts      # Phase 5
+│   │   ├── academic-provider.ts    # Phase 5
+│   │   ├── streaming-provider.ts   # Phase 5
+│   │   └── aggregator-provider.ts  # Phase 5
+│   └── resolution-engine.ts
 ├── tokens/          # Token system (Phase 3)
 │   ├── image-generator.ts
 │   ├── metadata-generator.ts
 │   ├── storage.ts
 │   └── commemorative-service.ts
+├── templates/       # Template system (Phase 5)
+│   ├── types.ts
+│   ├── builtin-templates.ts
+│   └── template-service.ts
+├── governance/      # Dispute resolution (Phase 6)
+│   ├── types.ts
+│   └── dispute-service.ts
+├── notifications/   # Webhooks & notifications (Phase 6)
+│   ├── types.ts
+│   └── notification-service.ts
+├── discovery/       # Search & discovery (Phase 6)
+│   └── search-service.ts
 └── database/        # PostgreSQL schema
 
 test/                # Test suites

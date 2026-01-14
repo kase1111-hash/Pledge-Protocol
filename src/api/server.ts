@@ -6,6 +6,10 @@ import oracleRoutes, { initializeOracleServices } from "./routes/oracles";
 import backerRoutes from "./routes/backers";
 import resolutionRoutes, { webhookHandler, resolutionEngine } from "./routes/resolution";
 import commemorativeRoutes from "./routes/commemoratives";
+import templateRoutes from "./routes/templates";
+import disputeRoutes from "./routes/disputes";
+import webhookRoutes from "./routes/webhooks";
+import analyticsRoutes from "./routes/analytics";
 
 dotenv.config();
 
@@ -29,8 +33,8 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    version: "4.0.0",
-    phase: 4,
+    version: "6.0.0",
+    phase: 6,
   });
 });
 
@@ -41,6 +45,10 @@ app.use("/v1/oracles", oracleRoutes);
 app.use("/v1/backers", backerRoutes);
 app.use("/v1/resolution", resolutionRoutes);
 app.use("/v1/commemoratives", commemorativeRoutes);
+app.use("/v1/templates", templateRoutes);
+app.use("/v1/disputes", disputeRoutes);
+app.use("/v1/webhooks", webhookRoutes);
+app.use("/v1/analytics", analyticsRoutes);
 
 // Error handler
 app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
