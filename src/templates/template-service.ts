@@ -279,7 +279,7 @@ export class TemplateService {
     }
 
     // Generate pledge types
-    let pledgeTypes = template.pledgeTypes.map((pt) => ({
+    const pledgeTypes = template.pledgeTypes.map((pt) => ({
       name: pt.name,
       description: pt.description,
       calculationType: pt.calculationType,

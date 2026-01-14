@@ -103,7 +103,7 @@ function calculateTieredPledge(
 
   // Calculate amount using tiered rates
   let calculated = BigInt(0);
-  let remainingUnits = unitValue;
+  const remainingUnits = unitValue;
 
   for (let i = 0; i < sortedTiers.length && remainingUnits > 0; i++) {
     const tier = sortedTiers[i];
