@@ -225,6 +225,83 @@ This is commitment infrastructure. Making pledges real.
 
 ## API Reference
 
+### Advanced Pledge Types (Phase 4)
+
+Phase 4 introduces flexible pledge calculation types that automatically compute release amounts based on oracle-verified outcomes.
+
+#### Flat Pledges
+
+Fixed amount released on milestone completion:
+
+```json
+{
+  "calculationType": "flat",
+  "baseAmount": "50000000000000000000",
+  "minimum": "10000000000000000000"
+}
+```
+
+#### Per-Unit Pledges
+
+Amount calculated based on a verified metric (e.g., miles run, commits merged):
+
+```json
+{
+  "calculationType": "per_unit",
+  "perUnitAmount": "2000000000000000000",
+  "unitField": "miles_completed",
+  "cap": "60000000000000000000",
+  "minimum": "0"
+}
+```
+
+Example: $2 per mile, capped at $60. If runner completes 26.2 miles, $52 releases.
+
+#### Tiered Pledges
+
+Stepped rates that increase at thresholds:
+
+```json
+{
+  "calculationType": "tiered",
+  "unitField": "miles_completed",
+  "tiers": [
+    { "threshold": 0, "rate": "1000000000000000000" },
+    { "threshold": 10, "rate": "2000000000000000000" },
+    { "threshold": 20, "rate": "3000000000000000000" }
+  ],
+  "cap": "100000000000000000000",
+  "minimum": "0"
+}
+```
+
+Example: $1/mile for first 10 miles, $2/mile for miles 10-20, $3/mile after 20.
+
+#### Conditional Pledges
+
+All-or-nothing based on a condition:
+
+```json
+{
+  "calculationType": "conditional",
+  "condition": {
+    "field": "finish_time_seconds",
+    "operator": "lt",
+    "value": 14400
+  },
+  "minimum": "50000000000000000000"
+}
+```
+
+Supported operators:
+- `exists`: Field is present in oracle data
+- `eq`: Equal to value
+- `gt` / `gte`: Greater than (or equal)
+- `lt` / `lte`: Less than (or equal)
+- `between`: Within range (requires `value` and `valueEnd`)
+
+Example: Release $50 if finish time is under 4 hours (14400 seconds).
+
 ### Commemoratives API (Phase 3)
 
 Generate and manage commemorative tokens:
@@ -289,7 +366,7 @@ Images and metadata are stored permanently:
 - **Phase 1** ✅: Core protocol (campaigns, pledges, escrow, manual attestation)
 - **Phase 2** ✅: Oracle framework (API oracles, race timing, GitHub, resolution engine)
 - **Phase 3** ✅: Token system (commemoratives, image generation, IPFS/Arweave)
-- **Phase 4** (Planned): Tiered pledges, conditional pledges, aggregation oracles
+- **Phase 4** ✅: Advanced pledges (per-unit, tiered, conditional calculation types)
 
 ### Running Locally
 

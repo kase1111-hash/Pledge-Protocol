@@ -11,7 +11,7 @@ import "./interfaces/IOracleRegistry.sol";
 /**
  * @title PledgeManager
  * @notice Manages pledge creation, resolution, and cancellation
- * @dev Phase 1 implementation with flat pledges only
+ * @dev Phase 4: Supports all pledge types (Flat, PerUnit, Tiered, Conditional)
  */
 contract PledgeManager is IPledgeManager, AccessControl, ReentrancyGuard {
     bytes32 public constant PROTOCOL_ROLE = keccak256("PROTOCOL_ROLE");
@@ -24,6 +24,9 @@ contract PledgeManager is IPledgeManager, AccessControl, ReentrancyGuard {
 
     /// @notice Mapping of pledge ID to pledge data
     mapping(bytes32 => Pledge) private pledges;
+
+    /// @notice Mapping of pledge ID to calculation parameters
+    mapping(bytes32 => CalculationParams) private pledgeCalculationParams;
 
     /// @notice Mapping of campaign ID to array of pledge IDs
     mapping(bytes32 => bytes32[]) private campaignPledges;
@@ -55,7 +58,7 @@ contract PledgeManager is IPledgeManager, AccessControl, ReentrancyGuard {
         _grantRole(RESOLVER_ROLE, msg.sender);
     }
 
-    /// @notice Creates a new pledge
+    /// @notice Creates a new pledge (flat pledges or simple advanced pledges)
     function createPledge(
         bytes32 campaignId,
         PledgeType pledgeType,
@@ -71,9 +74,52 @@ contract PledgeManager is IPledgeManager, AccessControl, ReentrancyGuard {
             require(msg.value <= campaign.maximumPledge, "Exceeds maximum pledge");
         }
 
-        // Phase 1: Only flat pledges supported
-        require(pledgeType == PledgeType.Flat, "Only flat pledges in Phase 1");
+        pledgeId = _createPledgeInternal(campaignId, pledgeType, backerName);
 
+        emit PledgeCreated(pledgeId, campaignId, msg.sender, msg.value, pledgeType);
+    }
+
+    /// @notice Creates a new pledge with calculation parameters (Phase 4)
+    function createAdvancedPledge(
+        bytes32 campaignId,
+        PledgeType pledgeType,
+        string calldata backerName,
+        CalculationParams calldata params
+    ) external payable nonReentrant returns (bytes32 pledgeId) {
+        require(msg.value > 0, "Must send funds");
+        require(campaignRegistry.isPledgingOpen(campaignId), "Pledging not open");
+        require(pledgeType != PledgeType.Flat, "Use createPledge for flat pledges");
+
+        ICampaignRegistry.Campaign memory campaign = campaignRegistry.getCampaign(campaignId);
+
+        require(msg.value >= campaign.minimumPledge, "Below minimum pledge");
+        if (campaign.maximumPledge > 0) {
+            require(msg.value <= campaign.maximumPledge, "Exceeds maximum pledge");
+        }
+
+        // Validate calculation parameters based on pledge type
+        _validateCalculationParams(pledgeType, params);
+
+        pledgeId = _createPledgeInternal(campaignId, pledgeType, backerName);
+
+        // Store calculation parameters
+        pledgeCalculationParams[pledgeId] = params;
+
+        // Emit advanced pledge event with encoded params
+        emit AdvancedPledgeCreated(
+            pledgeId,
+            campaignId,
+            pledgeType,
+            abi.encode(params)
+        );
+    }
+
+    /// @notice Internal function to create a pledge
+    function _createPledgeInternal(
+        bytes32 campaignId,
+        PledgeType pledgeType,
+        string calldata backerName
+    ) private returns (bytes32 pledgeId) {
         pledgeId = keccak256(
             abi.encodePacked(
                 msg.sender,
@@ -106,8 +152,23 @@ contract PledgeManager is IPledgeManager, AccessControl, ReentrancyGuard {
 
         // Update campaign pledge count
         campaignRegistry.incrementPledgeCount(campaignId);
+    }
 
-        emit PledgeCreated(pledgeId, campaignId, msg.sender, msg.value, pledgeType);
+    /// @notice Validates calculation parameters for advanced pledge types
+    function _validateCalculationParams(
+        PledgeType pledgeType,
+        CalculationParams calldata params
+    ) private pure {
+        if (pledgeType == PledgeType.PerUnit) {
+            require(params.perUnitAmount > 0, "Per-unit amount must be positive");
+            require(bytes(params.unitField).length > 0, "Unit field required");
+        } else if (pledgeType == PledgeType.Tiered) {
+            require(params.tiersData.length > 0, "Tiers data required");
+            // Tiers will be decoded and validated off-chain before resolution
+        } else if (pledgeType == PledgeType.Conditional) {
+            require(bytes(params.conditionField).length > 0, "Condition field required");
+            require(params.conditionOperator <= 5, "Invalid operator");
+        }
     }
 
     /// @notice Resolves a single pledge
@@ -220,6 +281,12 @@ contract PledgeManager is IPledgeManager, AccessControl, ReentrancyGuard {
     function getPledge(bytes32 pledgeId) external view returns (Pledge memory) {
         require(pledges[pledgeId].backer != address(0), "Pledge does not exist");
         return pledges[pledgeId];
+    }
+
+    /// @notice Gets calculation parameters for a pledge
+    function getCalculationParams(bytes32 pledgeId) external view returns (CalculationParams memory) {
+        require(pledges[pledgeId].backer != address(0), "Pledge does not exist");
+        return pledgeCalculationParams[pledgeId];
     }
 
     /// @notice Gets all pledge IDs for a campaign
