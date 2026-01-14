@@ -19,6 +19,13 @@ import complianceRoutes from "./routes/compliance";
 import enterpriseRoutes from "./routes/enterprise";
 import riskRoutes from "./routes/risk";
 
+// Phase 10: Platform maturity routes
+import notificationRoutes from "./routes/notifications";
+import reportRoutes from "./routes/reports";
+import integrationRoutes from "./routes/integrations";
+import i18nRoutes from "./routes/i18n";
+import campaignsAdvancedRoutes from "./routes/campaigns-advanced";
+
 // Phase 7: Security middleware
 import {
   requestIdMiddleware,
@@ -79,8 +86,8 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    version: "9.0.0",
-    phase: 9,
+    version: "10.0.0",
+    phase: 10,
   });
 });
 
@@ -118,6 +125,13 @@ app.use("/v1/compliance", complianceRoutes);
 app.use("/v1/enterprise", enterpriseRoutes);
 app.use("/v1/risk", riskRoutes);
 
+// Phase 10: Platform maturity routes
+app.use("/v1/notifications", notificationRoutes);
+app.use("/v1/reports", reportRoutes);
+app.use("/v1/integrations", integrationRoutes);
+app.use("/v1/i18n", i18nRoutes);
+app.use("/v1/campaigns/advanced", campaignsAdvancedRoutes);
+
 // ============================================================================
 // ERROR HANDLING
 // ============================================================================
@@ -135,8 +149,8 @@ app.use(notFoundMiddleware);
 app.listen(PORT, () => {
   logger.info(`Pledge Protocol API started`, {
     port: PORT,
-    version: "9.0.0",
-    phase: 9,
+    version: "10.0.0",
+    phase: 10,
     environment: process.env.NODE_ENV || "development",
   });
   console.log(`Pledge Protocol API running on port ${PORT}`);
@@ -147,6 +161,10 @@ app.listen(PORT, () => {
   console.log(`Compliance: http://localhost:${PORT}/v1/compliance`);
   console.log(`Enterprise: http://localhost:${PORT}/v1/enterprise`);
   console.log(`Risk: http://localhost:${PORT}/v1/risk`);
+  console.log(`Notifications: http://localhost:${PORT}/v1/notifications`);
+  console.log(`Reports: http://localhost:${PORT}/v1/reports`);
+  console.log(`Integrations: http://localhost:${PORT}/v1/integrations`);
+  console.log(`i18n: http://localhost:${PORT}/v1/i18n`);
 });
 
 // Graceful shutdown
