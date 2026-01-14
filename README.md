@@ -686,6 +686,678 @@ GET /v1/monitoring/security?severity=high
 POST /v1/monitoring/cleanup
 ```
 
+### Multi-Chain API (Phase 8)
+
+Deploy and manage campaigns across multiple blockchain networks:
+
+```bash
+# List supported chains
+GET /v1/chains
+
+# Get chain details
+GET /v1/chains/:chainId
+
+# Get chain contracts
+GET /v1/chains/:chainId/contracts
+
+# Get campaigns on chain
+GET /v1/chains/:chainId/campaigns
+
+# Estimate deployment gas
+POST /v1/chains/:chainId/estimate
+{
+  "name": "Portland Marathon 2026",
+  "beneficiary": "0x...",
+  "deadline": 1712448000
+}
+
+# Deploy to single chain
+POST /v1/chains/:chainId/deploy
+{
+  "campaignId": "campaign_123",
+  "creator": "0x...",
+  "name": "Portland Marathon 2026",
+  "beneficiary": "0x...",
+  "deadline": 1712448000
+}
+
+# Deploy to multiple chains
+POST /v1/chains/deploy-multi
+{
+  "campaignId": "campaign_123",
+  "creator": "0x...",
+  "chainIds": [137, 42161, 10],
+  "campaignData": { ... }
+}
+
+# Get recommended chains
+POST /v1/chains/recommended
+{ "preferLowCost": true, "requireMainnet": false }
+```
+
+#### Supported Chains
+
+| Chain | ID | Type | Features |
+|-------|-----|------|----------|
+| Ethereum | 1 | Mainnet | Production, EIP-1559 |
+| Polygon | 137 | Mainnet | Low cost, fast blocks |
+| Arbitrum One | 42161 | Mainnet | L2 rollup, low fees |
+| Optimism | 10 | Mainnet | L2 rollup, OP Stack |
+| Base | 8453 | Mainnet | Coinbase L2 |
+| Sepolia | 11155111 | Testnet | Ethereum testnet |
+| Polygon Amoy | 80002 | Testnet | Polygon testnet |
+| Arbitrum Sepolia | 421614 | Testnet | Arbitrum testnet |
+| Optimism Sepolia | 11155420 | Testnet | Optimism testnet |
+| Base Sepolia | 84532 | Testnet | Base testnet |
+| Local | 31337 | Local | Hardhat/Anvil |
+
+### Social API (Phase 8)
+
+User profiles, follows, comments, and activity feeds:
+
+```bash
+# Get user profile
+GET /v1/social/users/:address
+
+# Update own profile
+PUT /v1/social/users/me
+{
+  "displayName": "Sarah Chen",
+  "bio": "Marathon runner for charity",
+  "avatar": "https://...",
+  "preferences": {
+    "publicProfile": true,
+    "showPledgeAmounts": true,
+    "emailNotifications": true
+  }
+}
+
+# Search users
+GET /v1/social/users/search?q=sarah
+
+# Follow user
+POST /v1/social/users/:address/follow
+
+# Unfollow user
+DELETE /v1/social/users/:address/follow
+
+# Check if following
+GET /v1/social/users/:address/is-following
+
+# Get followers
+GET /v1/social/users/:address/followers
+
+# Get following
+GET /v1/social/users/:address/following
+```
+
+#### Comments
+
+```bash
+# Create comment
+POST /v1/social/campaigns/:campaignId/comments
+{
+  "content": "Good luck on the marathon!",
+  "parentId": null
+}
+
+# Get campaign comments
+GET /v1/social/campaigns/:campaignId/comments?sortBy=newest&limit=50
+
+# Update comment
+PUT /v1/social/comments/:commentId
+{ "content": "Updated comment text" }
+
+# Delete comment
+DELETE /v1/social/comments/:commentId
+
+# Like comment
+POST /v1/social/comments/:commentId/like
+
+# Unlike comment
+DELETE /v1/social/comments/:commentId/like
+
+# Report comment
+POST /v1/social/comments/:commentId/report
+{ "reason": "spam" }
+
+# Pin comment (admin)
+POST /v1/social/comments/:commentId/pin
+{ "pinned": true }
+```
+
+#### Activity Feed
+
+```bash
+# Personal feed (from followed users)
+GET /v1/social/feed?limit=50
+
+# Global feed
+GET /v1/social/feed/global
+
+# User activity
+GET /v1/social/users/:address/activity?types=campaign_created,pledge_created
+```
+
+#### Leaderboards
+
+```bash
+# Creator leaderboard
+GET /v1/social/leaderboard/creators?metric=raised&period=monthly&limit=50
+
+# Backer leaderboard
+GET /v1/social/leaderboard/backers?metric=pledged&limit=50
+```
+
+Metrics: `raised`, `campaigns`, `successRate`, `backers` (creators) or `pledged`, `campaigns`, `commemoratives` (backers)
+
+Periods: `weekly`, `monthly`, `yearly`, `all_time`
+
+#### Statistics
+
+```bash
+# Social system stats
+GET /v1/social/stats
+```
+
+### Payment API (Phase 9)
+
+Fiat payment processing with automatic settlement to stablecoin escrow:
+
+```bash
+# Create checkout session
+POST /v1/payments/checkout
+{
+  "campaignId": "campaign_123",
+  "pledgeId": "pledge_456",
+  "amount": "50.00",
+  "currency": "usd",
+  "method": "card",
+  "backerAddress": "0x...",
+  "successUrl": "https://myapp.com/success",
+  "cancelUrl": "https://myapp.com/cancel",
+  "metadata": { "referrer": "homepage" }
+}
+
+# Get checkout session
+GET /v1/payments/checkout/:sessionId
+
+# Settle to stablecoin
+POST /v1/payments/:sessionId/settle
+{
+  "targetCurrency": "USDC",
+  "destinationAddress": "0x..."
+}
+
+# Request refund
+POST /v1/payments/refunds
+{
+  "sessionId": "session_123",
+  "amount": "25.00",
+  "reason": "Partial refund per dispute resolution"
+}
+
+# Create subscription
+POST /v1/payments/subscriptions
+{
+  "campaignId": "campaign_123",
+  "amount": "10.00",
+  "currency": "usd",
+  "interval": "monthly",
+  "customerAddress": "0x..."
+}
+
+# Submit KYC
+POST /v1/payments/kyc
+{
+  "address": "0x...",
+  "tier": "standard",
+  "firstName": "John",
+  "lastName": "Doe",
+  "email": "john@example.com",
+  "countryCode": "US"
+}
+
+# Webhooks (for Stripe/Circle callbacks)
+POST /v1/payments/webhooks/stripe
+POST /v1/payments/webhooks/circle
+```
+
+#### Payment Providers
+
+| Provider | Methods | Currencies | Use Case |
+|----------|---------|------------|----------|
+| Stripe | `card` | USD, EUR, GBP | Credit/debit cards |
+| Circle | `ach`, `wire` | USD | Bank transfers, USDC |
+| Moonpay | `card`, `ach` | USD, EUR | Crypto on-ramp |
+
+#### Settlement Flow
+
+1. User pays with fiat (credit card, bank transfer)
+2. Payment processor confirms receipt
+3. Settlement service converts to USDC at market rate
+4. USDC deposited to campaign escrow contract
+5. Funds release to beneficiary on milestone verification
+
+### Compliance API (Phase 9)
+
+GDPR, CCPA, and data privacy compliance:
+
+```bash
+# Request data export (GDPR Article 20)
+POST /v1/compliance/export
+{
+  "address": "0x...",
+  "format": "json",
+  "includeMetadata": true
+}
+
+# Request data deletion (GDPR Article 17)
+POST /v1/compliance/delete
+{
+  "address": "0x...",
+  "reason": "user_request",
+  "retainLegalRequired": true
+}
+
+# Confirm deletion (requires token from email)
+POST /v1/compliance/delete/confirm
+{
+  "requestId": "del_123",
+  "confirmationToken": "abc123"
+}
+
+# Update consent preferences
+PUT /v1/compliance/consent/:address
+{
+  "marketing": true,
+  "analytics": false,
+  "thirdPartySharing": false
+}
+
+# Exercise GDPR rights
+POST /v1/compliance/gdpr
+{
+  "address": "0x...",
+  "right": "access",
+  "details": {}
+}
+
+# Exercise CCPA rights
+POST /v1/compliance/ccpa
+{
+  "address": "0x...",
+  "right": "know",
+  "details": {}
+}
+```
+
+#### GDPR Rights
+
+| Right | Article | Description |
+|-------|---------|-------------|
+| `access` | 15 | Right to access personal data |
+| `rectification` | 16 | Right to correct inaccurate data |
+| `erasure` | 17 | Right to be forgotten |
+| `restriction` | 18 | Right to restrict processing |
+| `portability` | 20 | Right to data portability |
+| `object` | 21 | Right to object to processing |
+
+#### CCPA Rights
+
+| Right | Description |
+|-------|-------------|
+| `know` | Right to know what data is collected |
+| `delete` | Right to delete personal data |
+| `opt_out` | Right to opt out of data sale |
+| `non_discrimination` | Right to equal service |
+
+### Enterprise API (Phase 9)
+
+Organization management, teams, SSO, and bulk operations:
+
+```bash
+# Create organization
+POST /v1/enterprise/orgs
+{
+  "name": "Acme Corp",
+  "type": "company",
+  "ownerAddress": "0x...",
+  "settings": {
+    "defaultPledgeVisibility": "private",
+    "requireApproval": true
+  }
+}
+
+# List organizations
+GET /v1/enterprise/orgs
+
+# Get organization
+GET /v1/enterprise/orgs/:orgId
+
+# Update organization
+PUT /v1/enterprise/orgs/:orgId
+{ "settings": { "requireApproval": false } }
+
+# Add team member
+POST /v1/enterprise/orgs/:orgId/members
+{
+  "address": "0x...",
+  "role": "creator",
+  "addedBy": "0x..."
+}
+
+# Update member role
+PUT /v1/enterprise/orgs/:orgId/members/:address
+{ "role": "admin" }
+
+# Remove member
+DELETE /v1/enterprise/orgs/:orgId/members/:address
+
+# Create invite
+POST /v1/enterprise/orgs/:orgId/invites
+{
+  "email": "jane@example.com",
+  "role": "creator",
+  "invitedBy": "0x..."
+}
+
+# Accept invite
+POST /v1/enterprise/orgs/:orgId/invites/accept
+{ "token": "invite_token_123" }
+
+# Configure SSO
+POST /v1/enterprise/orgs/:orgId/sso
+{
+  "type": "saml",
+  "provider": "okta",
+  "entityId": "https://myapp.com/sso",
+  "ssoUrl": "https://idp.example.com/sso",
+  "x509Certificate": "-----BEGIN CERTIFICATE-----..."
+}
+
+# Create bulk operation
+POST /v1/enterprise/orgs/:orgId/bulk
+{
+  "type": "import_pledges",
+  "data": [
+    { "campaignId": "c1", "amount": "100", "backer": "0x..." },
+    { "campaignId": "c1", "amount": "200", "backer": "0x..." }
+  ],
+  "createdBy": "0x..."
+}
+
+# Get bulk operation status
+GET /v1/enterprise/orgs/:orgId/bulk/:operationId
+
+# Create API key
+POST /v1/enterprise/orgs/:orgId/api-keys
+{
+  "name": "Production API",
+  "permissions": ["campaign:read", "pledge:write"],
+  "createdBy": "0x..."
+}
+
+# List API keys
+GET /v1/enterprise/orgs/:orgId/api-keys
+
+# Revoke API key
+DELETE /v1/enterprise/orgs/:orgId/api-keys/:keyId
+```
+
+#### Team Roles
+
+| Role | Permissions |
+|------|-------------|
+| `owner` | Full control including deletion |
+| `admin` | Manage team, settings, API keys |
+| `creator` | Create and manage campaigns |
+| `moderator` | Moderate comments and disputes |
+| `viewer` | Read-only access |
+
+#### Billing Plans
+
+| Plan | Campaigns | Members | Features |
+|------|-----------|---------|----------|
+| `starter` | 5 | 3 | Basic features |
+| `professional` | 50 | 10 | SSO, custom domains |
+| `enterprise` | Unlimited | Unlimited | SLA, dedicated support |
+
+### Risk API (Phase 9)
+
+Creator verification, trust scoring, and fraud detection:
+
+```bash
+# Request verification
+POST /v1/risk/verify
+{
+  "address": "0x...",
+  "type": "identity",
+  "level": "standard"
+}
+
+# Get verification status
+GET /v1/risk/verify/:address
+
+# Calculate trust score
+POST /v1/risk/score/:address
+{
+  "stats": {
+    "campaignsCreated": 5,
+    "campaignsSuccessful": 4,
+    "totalRaised": "50000",
+    "avgCompletionRate": 0.92,
+    "disputeCount": 1,
+    "accountAgeDays": 365
+  }
+}
+
+# Assess risk for entity
+POST /v1/risk/assess
+{
+  "entityType": "campaign",
+  "entityId": "campaign_123",
+  "data": {
+    "amount": "100000",
+    "creatorAddress": "0x...",
+    "category": "creative"
+  }
+}
+
+# Get active alerts
+GET /v1/risk/alerts?severity=high&status=open
+
+# Add to blocklist
+POST /v1/risk/blocklist
+{
+  "type": "address",
+  "value": "0x...",
+  "reason": "Confirmed fraud",
+  "severity": "critical"
+}
+
+# Check blocklist
+GET /v1/risk/blocklist/check?type=address&value=0x...
+```
+
+#### Verification Types
+
+| Type | Description | Requirements |
+|------|-------------|--------------|
+| `identity` | KYC identity verification | Government ID |
+| `social` | Social media verification | Connected accounts |
+| `business` | Business verification | Registration docs |
+| `track_record` | Historical performance | Platform history |
+
+#### Trust Tiers
+
+| Tier | Score Range | Benefits |
+|------|-------------|----------|
+| `new` | 0-25 | Standard limits |
+| `established` | 26-50 | Increased limits |
+| `trusted` | 51-75 | Reduced fees |
+| `verified` | 76-100 | Premium features |
+
+#### Risk Levels
+
+| Level | Action |
+|-------|--------|
+| `low` | Auto-approve |
+| `medium` | Enhanced monitoring |
+| `high` | Manual review required |
+| `critical` | Block pending review |
+
+### Developer Tools (Phase 9)
+
+CLI and local sandbox for development:
+
+```bash
+# Install CLI
+npm install -g @pledge-protocol/cli
+
+# CLI Commands
+pledge create-campaign --name "Test Campaign" --beneficiary 0x...
+pledge list-campaigns --status active
+pledge create-pledge --campaign campaign_123 --amount 50
+pledge sandbox start --port 8545
+pledge simulate resolve --campaign campaign_123
+pledge generate-fixtures --output ./test/fixtures
+pledge config set apiKey YOUR_API_KEY
+```
+
+#### Local Sandbox
+
+```typescript
+import { createSandbox } from "@pledge-protocol/dev-tools";
+
+// Start local environment
+const sandbox = createSandbox({
+  chainId: 31337,
+  blockTime: 1000,
+  initialBalance: "1000000000000000000000",
+});
+
+await sandbox.start();
+
+// Create test campaign
+const campaign = sandbox.createCampaign({
+  name: "Test Marathon",
+  beneficiary: "0x...",
+  deadline: Date.now() + 86400000,
+  milestones: [{ name: "Finish", required: true }],
+});
+
+// Create pledge
+const pledge = sandbox.createPledge({
+  campaignId: campaign.id,
+  backer: "0x...",
+  amount: "50000000000000000000",
+});
+
+// Simulate oracle response
+const result = await sandbox.queryOracle("SELECT * FROM race_results");
+
+// Verify milestone
+await sandbox.verifyMilestone(campaign.id, "milestone_1");
+
+// Resolve campaign
+await sandbox.resolveCampaign(campaign.id);
+
+// Stop sandbox
+await sandbox.stop();
+```
+
+#### Test Fixtures
+
+```typescript
+import { createSandbox } from "@pledge-protocol/dev-tools";
+
+const sandbox = createSandbox();
+await sandbox.start();
+
+// Generate comprehensive test data
+const fixtures = sandbox.generateFixtures({
+  campaigns: 10,
+  pledgesPerCampaign: 5,
+  resolvedPercentage: 0.5,
+});
+
+// Export for external testing
+await sandbox.exportFixtures("./test/fixtures.json");
+```
+
+### TypeScript SDK (Phase 8)
+
+Developer-friendly client library for integrating with Pledge Protocol:
+
+```typescript
+import { createClient, ChainId } from "@pledge-protocol/sdk";
+
+// Initialize client
+const client = createClient({
+  baseUrl: "https://api.pledgeprotocol.io",
+  chainId: ChainId.Polygon,
+  apiKey: "your-api-key", // Optional
+});
+
+// Switch chains
+const arbitrumClient = client.forChain(ChainId.Arbitrum);
+
+// Campaigns
+const campaigns = await client.campaigns.list({ status: "active", limit: 10 });
+const campaign = await client.campaigns.get("campaign_123");
+const newCampaign = await client.campaigns.create({
+  name: "Portland Marathon 2026",
+  beneficiary: "0x...",
+  milestones: [...],
+});
+
+// Pledges
+const pledges = await client.pledges.list({ campaignId: "campaign_123" });
+const pledge = await client.pledges.create({
+  campaignId: "campaign_123",
+  amount: "50000000000000000000",
+  calculationType: "per_unit",
+  perUnitAmount: "2000000000000000000",
+});
+
+// Oracles
+const oracleResult = await client.oracles.query("oracle_id", { eventId: "123" });
+
+// Disputes
+const dispute = await client.disputes.create({
+  campaignId: "campaign_123",
+  category: "oracle_disagreement",
+  title: "Data mismatch",
+  description: "...",
+});
+
+// Commemoratives
+const commemoratives = await client.commemoratives.listByBacker("0x...");
+
+// Users (social)
+const profile = await client.users.getProfile("0x...");
+await client.users.follow("0x...");
+const feed = await client.users.getFeed();
+
+// Authentication
+const challenge = await client.auth.getChallenge("0x...");
+const session = await client.auth.verify({
+  address: "0x...",
+  message: challenge.message,
+  signature: "0x...",
+});
+client.setSessionId(session.sessionId);
+```
+
+#### SDK Features
+
+- **Type-safe**: Full TypeScript types for all API responses
+- **Multi-chain**: Easy chain switching with `forChain()`
+- **Authentication**: Session and API key support
+- **Retry logic**: Automatic retries with exponential backoff
+- **Error handling**: Structured error responses
+
 ### Rate Limiting (Phase 7)
 
 All API requests are rate limited based on authentication status:
@@ -843,6 +1515,8 @@ Images and metadata are stored permanently:
 - **Phase 5** ✅: Ecosystem (Strava/Academic/Streaming oracles, aggregator, templates)
 - **Phase 6** ✅: Governance (dispute resolution, webhooks, search/discovery, analytics)
 - **Phase 7** ✅: Production (authentication, rate limiting, caching, job queue, monitoring)
+- **Phase 8** ✅: Ecosystem expansion (multi-chain, TypeScript SDK, social features)
+- **Phase 9** ✅: Enterprise (payments, compliance, organizations, risk, developer tools)
 
 ### Running Locally
 
@@ -881,7 +1555,13 @@ src/
 │       ├── webhooks.ts         # Phase 6
 │       ├── analytics.ts        # Phase 6
 │       ├── auth.ts             # Phase 7
-│       └── monitoring.ts       # Phase 7
+│       ├── monitoring.ts       # Phase 7
+│       ├── social.ts           # Phase 8
+│       ├── chains.ts           # Phase 8
+│       ├── payments.ts         # Phase 9
+│       ├── compliance.ts       # Phase 9
+│       ├── enterprise.ts       # Phase 9
+│       └── risk.ts             # Phase 9
 ├── oracle/          # Oracle system (Phase 2 + 5)
 │   ├── providers/
 │   │   ├── api-provider.ts
@@ -919,6 +1599,35 @@ src/
 │   ├── cache.ts
 │   ├── job-queue.ts
 │   └── health.ts
+├── multichain/      # Multi-chain support (Phase 8)
+│   ├── config.ts
+│   ├── registry.ts
+│   └── deployment-service.ts
+├── sdk/             # TypeScript SDK (Phase 8)
+│   ├── types.ts
+│   └── client.ts
+├── social/          # Social features (Phase 8)
+│   ├── types.ts
+│   └── social-service.ts
+├── payments/        # Fiat payments (Phase 9)
+│   ├── types.ts
+│   ├── stripe-provider.ts
+│   ├── circle-provider.ts
+│   ├── settlement-service.ts
+│   └── payment-processor.ts
+├── compliance/      # GDPR/CCPA compliance (Phase 9)
+│   ├── types.ts
+│   └── gdpr-service.ts
+├── enterprise/      # Organization management (Phase 9)
+│   ├── types.ts
+│   └── organization-service.ts
+├── risk/            # Fraud detection (Phase 9)
+│   ├── types.ts
+│   └── fraud-detector.ts
+├── dev-tools/       # Developer tools (Phase 9)
+│   ├── types.ts
+│   ├── cli.ts
+│   └── sandbox.ts
 └── database/        # PostgreSQL schema
 
 test/                # Test suites

@@ -12,6 +12,12 @@ import webhookRoutes from "./routes/webhooks";
 import analyticsRoutes from "./routes/analytics";
 import authRoutes from "./routes/auth";
 import monitoringRoutes from "./routes/monitoring";
+import socialRoutes from "./routes/social";
+import chainRoutes from "./routes/chains";
+import paymentRoutes from "./routes/payments";
+import complianceRoutes from "./routes/compliance";
+import enterpriseRoutes from "./routes/enterprise";
+import riskRoutes from "./routes/risk";
 
 // Phase 7: Security middleware
 import {
@@ -73,8 +79,8 @@ app.get("/health", (_req: Request, res: Response) => {
   res.json({
     status: "ok",
     timestamp: new Date().toISOString(),
-    version: "7.0.0",
-    phase: 7,
+    version: "9.0.0",
+    phase: 9,
   });
 });
 
@@ -102,6 +108,16 @@ app.use("/v1/disputes", disputeRoutes);
 app.use("/v1/webhooks", webhookRoutes);
 app.use("/v1/analytics", analyticsRoutes);
 
+// Phase 8: Ecosystem routes
+app.use("/v1/social", socialRoutes);
+app.use("/v1/chains", chainRoutes);
+
+// Phase 9: Enterprise routes
+app.use("/v1/payments", paymentRoutes);
+app.use("/v1/compliance", complianceRoutes);
+app.use("/v1/enterprise", enterpriseRoutes);
+app.use("/v1/risk", riskRoutes);
+
 // ============================================================================
 // ERROR HANDLING
 // ============================================================================
@@ -119,14 +135,18 @@ app.use(notFoundMiddleware);
 app.listen(PORT, () => {
   logger.info(`Pledge Protocol API started`, {
     port: PORT,
-    version: "7.0.0",
-    phase: 7,
+    version: "9.0.0",
+    phase: 9,
     environment: process.env.NODE_ENV || "development",
   });
   console.log(`Pledge Protocol API running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/health`);
   console.log(`Monitoring: http://localhost:${PORT}/v1/monitoring/health`);
   console.log(`Metrics: http://localhost:${PORT}/v1/monitoring/metrics`);
+  console.log(`Payments: http://localhost:${PORT}/v1/payments`);
+  console.log(`Compliance: http://localhost:${PORT}/v1/compliance`);
+  console.log(`Enterprise: http://localhost:${PORT}/v1/enterprise`);
+  console.log(`Risk: http://localhost:${PORT}/v1/risk`);
 });
 
 // Graceful shutdown
