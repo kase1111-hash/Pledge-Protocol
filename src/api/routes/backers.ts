@@ -1,4 +1,10 @@
+/**
+ * Backer Routes
+ * Phase 1 & 3: Backer pledge and commemorative queries
+ */
+
 import { Router, Request, Response } from "express";
+import { commemorativeService, storageService } from "../../tokens";
 
 const router = Router();
 
@@ -28,7 +34,7 @@ router.get("/me/pledges", (req: Request, res: Response) => {
   });
 });
 
-// Get commemoratives for authenticated backer
+// Get commemoratives for authenticated backer (Phase 3)
 router.get("/me/commemoratives", (req: Request, res: Response) => {
   const walletAddress = req.headers["x-wallet-address"] as string;
 
@@ -41,9 +47,26 @@ router.get("/me/commemoratives", (req: Request, res: Response) => {
     });
   }
 
-  // In production, this would query the blockchain for soulbound tokens
+  // Query commemoratives by backer address
+  const records = commemorativeService.getByBackerAddress(walletAddress);
+
   res.json({
-    commemoratives: [],
+    address: walletAddress,
+    count: records.length,
+    commemoratives: records.map(r => ({
+      id: r.id,
+      pledgeId: r.pledgeId,
+      campaignId: r.campaignId,
+      name: r.metadata.name,
+      description: r.metadata.description,
+      imageUrl: storageService.toHttpUrl(r.imageUri),
+      metadataUrl: storageService.toHttpUrl(r.metadataUri),
+      attributes: r.metadata.attributes,
+      minted: r.minted,
+      tokenId: r.tokenId,
+      createdAt: r.createdAt,
+      mintedAt: r.mintedAt
+    }))
   });
 });
 
@@ -68,7 +91,7 @@ router.get("/:address/pledges", (req: Request, res: Response) => {
   });
 });
 
-// Get commemoratives for any address
+// Get commemoratives for any address (Phase 3)
 router.get("/:address/commemoratives", (req: Request, res: Response) => {
   const { address } = req.params;
 
@@ -82,9 +105,26 @@ router.get("/:address/commemoratives", (req: Request, res: Response) => {
     });
   }
 
-  // In production, query blockchain for soulbound tokens
+  // Query commemoratives by backer address
+  const records = commemorativeService.getByBackerAddress(address);
+
   res.json({
-    commemoratives: [],
+    address,
+    count: records.length,
+    commemoratives: records.map(r => ({
+      id: r.id,
+      pledgeId: r.pledgeId,
+      campaignId: r.campaignId,
+      name: r.metadata.name,
+      description: r.metadata.description,
+      imageUrl: storageService.toHttpUrl(r.imageUri),
+      metadataUrl: storageService.toHttpUrl(r.metadataUri),
+      attributes: r.metadata.attributes,
+      minted: r.minted,
+      tokenId: r.tokenId,
+      createdAt: r.createdAt,
+      mintedAt: r.mintedAt
+    }))
   });
 });
 
