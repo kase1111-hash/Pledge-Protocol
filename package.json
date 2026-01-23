@@ -23,7 +23,7 @@
     "nft",
     "solidity"
   ],
-  "author": "",
+  "author": "Kase Branham",
   "license": "MIT",
   "devDependencies": {
     "@nomicfoundation/hardhat-chai-matchers": "^2.0.0",
