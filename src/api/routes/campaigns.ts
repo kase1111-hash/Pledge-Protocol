@@ -56,7 +56,7 @@ interface MilestoneCondition {
   type: "completion" | "threshold" | "range" | "custom";
   field: string;
   operator: string;
-  value: any;
+  value: string | number | boolean | null;
 }
 
 // Tier for tiered pledges (Phase 4)
@@ -132,7 +132,7 @@ const createCampaignSchema = z.object({
       type: z.enum(["completion", "threshold", "range", "custom"]),
       field: z.string(),
       operator: z.string(),
-      value: z.any(),
+      value: z.union([z.string(), z.number(), z.boolean(), z.null()]),
     }),
     releasePercentage: z.number().min(0).max(100),
   })),
@@ -158,10 +158,20 @@ const createCampaignSchema = z.object({
   visibility: z.enum(["public", "semi-private", "private"]).optional(),
 });
 
+// Input type for pledge type validation
+interface PledgeTypeInput {
+  name: string;
+  calculationType: "flat" | "per_unit" | "tiered" | "conditional";
+  perUnitAmount?: string | null;
+  unitField?: string | null;
+  tiers?: Tier[] | null;
+  condition?: PledgeCondition | null;
+}
+
 /**
  * Validate pledge type configuration based on calculation type
  */
-function validatePledgeTypeConfig(pledgeType: any): { valid: boolean; error?: string } {
+function validatePledgeTypeConfig(pledgeType: PledgeTypeInput): { valid: boolean; error?: string } {
   switch (pledgeType.calculationType) {
     case "flat":
       // Flat pledges need a base amount or just minimum

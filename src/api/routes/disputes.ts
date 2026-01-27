@@ -156,7 +156,18 @@ router.get("/", (req: Request, res: Response) => {
   try {
     const query = FilterQuerySchema.parse(req.query);
 
-    const filters: any = {};
+    const filters: {
+      campaignId?: string;
+      status?: string | string[];
+      category?: string;
+      tier?: string;
+      raisedBy?: string;
+      affectsAddress?: string;
+      priority?: string;
+      votingActive?: boolean;
+      fromDate?: number;
+      toDate?: number;
+    } = {};
     if (query.campaignId) filters.campaignId = query.campaignId;
     if (query.status) {
       const statuses = query.status.split(",").map((s) => s.trim());
@@ -530,7 +541,7 @@ router.post("/:disputeId/resolve", async (req: Request, res: Response) => {
       outcome: parsed.data.outcome,
       releasePercent: parsed.data.releasePercent,
       refundPercent: parsed.data.refundPercent,
-      decidedBy: decidedBy as any,
+      decidedBy: decidedBy as "auto" | "voting" | "council" | "admin",
       rationale: parsed.data.rationale,
       evidenceIds: parsed.data.evidenceIds || [],
     });
