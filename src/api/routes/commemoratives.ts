@@ -34,7 +34,7 @@ const generateSingleSchema = z.object({
   resolvedAt: z.number(),
   outcomeSummary: z.string(),
   templateType: z.enum(["race_finish", "academic", "creative", "generic"]).optional(),
-  customData: z.record(z.any()).optional(),
+  customData: z.record(z.string(), z.unknown()).optional(),
   storageProvider: z.enum(["ipfs", "arweave"]).optional()
 });
 
@@ -47,7 +47,7 @@ const generateCampaignSchema = z.object({
   resolvedAt: z.number(),
   outcomeSummary: z.string(),
   templateType: z.enum(["race_finish", "academic", "creative", "generic"]).optional(),
-  customTemplateData: z.record(z.any()).optional(),
+  customTemplateData: z.record(z.string(), z.unknown()).optional(),
   pledges: z.array(z.object({
     pledgeId: z.string(),
     backerName: z.string(),
