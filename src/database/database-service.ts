@@ -7,7 +7,10 @@
  * - PostgreSQL (production)
  *
  * Usage:
- *   import { db } from '../database';
+ *   import { db, initializeDatabase } from '../database';
+ *
+ *   // Initialize database (call once at startup)
+ *   await initializeDatabase();
  *
  *   // Create a campaign
  *   const campaign = await db.campaigns.create({ ... });
@@ -21,6 +24,7 @@
 
 import { IDatabaseService } from "./types";
 import { MemoryDatabaseService, memoryDatabase } from "./memory-store";
+import { createPostgresDatabase, createPostgresPool, PostgresDatabaseService } from "./postgres-store";
 
 /**
  * Database configuration
@@ -33,6 +37,11 @@ export interface DatabaseConfig {
     max?: number;
   };
 }
+
+// Module-level database instance
+let _db: IDatabaseService | null = null;
+let _config: DatabaseConfig | null = null;
+let _initialized = false;
 
 /**
  * Get database configuration from environment
@@ -71,29 +80,104 @@ function getConfigFromEnv(): DatabaseConfig {
 }
 
 /**
- * Create database service instance based on configuration
+ * Initialize database connection
+ * Call this once at application startup
  */
-function createDatabaseService(config: DatabaseConfig): IDatabaseService {
-  if (config.type === "memory") {
-    console.log("Using in-memory database storage");
-    return memoryDatabase;
+export async function initializeDatabase(config?: DatabaseConfig): Promise<IDatabaseService> {
+  if (_initialized && _db) {
+    return _db;
   }
 
-  // PostgreSQL implementation would go here
-  // For now, fall back to memory if PostgreSQL is requested but not implemented
-  console.warn(
-    "PostgreSQL support not yet implemented, falling back to in-memory storage"
-  );
-  return memoryDatabase;
+  _config = config || getConfigFromEnv();
+
+  if (_config.type === "memory") {
+    console.log("Using in-memory database storage");
+    _db = memoryDatabase;
+    _initialized = true;
+    return _db;
+  }
+
+  if (_config.type === "postgresql") {
+    console.log("Connecting to PostgreSQL database...");
+    try {
+      const pool = await createPostgresPool({
+        connectionString: _config.connectionString,
+        min: _config.pool?.min || 2,
+        max: _config.pool?.max || 10,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 5000,
+      });
+
+      _db = createPostgresDatabase(pool);
+
+      // Verify connection
+      const connected = await _db.isConnected();
+      if (!connected) {
+        throw new Error("Failed to connect to PostgreSQL");
+      }
+
+      console.log("PostgreSQL database connected successfully");
+      _initialized = true;
+      return _db;
+    } catch (error) {
+      console.error("PostgreSQL connection failed:", error);
+      console.warn("Falling back to in-memory storage");
+      _db = memoryDatabase;
+      _config = { type: "memory" };
+      _initialized = true;
+      return _db;
+    }
+  }
+
+  // Fallback
+  console.warn("Unknown database type, using in-memory storage");
+  _db = memoryDatabase;
+  _initialized = true;
+  return _db;
 }
 
-// Create singleton instance
-const config = getConfigFromEnv();
-export const db: IDatabaseService = createDatabaseService(config);
+/**
+ * Get database instance
+ * Will auto-initialize with default config if not already initialized
+ */
+export function getDatabase(): IDatabaseService {
+  if (!_initialized || !_db) {
+    // Synchronous fallback for code that doesn't await initializeDatabase
+    console.warn(
+      "Database accessed before initialization. Using in-memory storage. " +
+        "Call initializeDatabase() at app startup for PostgreSQL support."
+    );
+    _db = memoryDatabase;
+    _config = { type: "memory" };
+    _initialized = true;
+  }
+  return _db;
+}
 
-// Re-export types for convenience
-export type { IDatabaseService } from "./types";
-export { MemoryDatabaseService } from "./memory-store";
+/**
+ * Database singleton (use getDatabase() for lazy access)
+ * For backwards compatibility and simple usage
+ */
+export const db: IDatabaseService = new Proxy({} as IDatabaseService, {
+  get(_target, prop) {
+    const database = getDatabase();
+    return (database as Record<string, unknown>)[prop as string];
+  },
+});
+
+/**
+ * Get current database configuration
+ */
+export function getDatabaseConfig(): DatabaseConfig {
+  return _config || { type: "memory" };
+}
+
+/**
+ * Check if database is initialized
+ */
+export function isDatabaseInitialized(): boolean {
+  return _initialized;
+}
 
 /**
  * Health check function
@@ -104,16 +188,34 @@ export async function checkDatabaseHealth(): Promise<{
   error?: string;
 }> {
   try {
-    const connected = await db.isConnected();
+    const database = getDatabase();
+    const connected = await database.isConnected();
     return {
       connected,
-      type: config.type,
+      type: getDatabaseConfig().type,
     };
   } catch (error) {
     return {
       connected: false,
-      type: config.type,
+      type: getDatabaseConfig().type,
       error: error instanceof Error ? error.message : "Unknown error",
     };
   }
 }
+
+/**
+ * Close database connection
+ * Call this on application shutdown
+ */
+export async function closeDatabase(): Promise<void> {
+  if (_db && _config?.type === "postgresql") {
+    await (_db as PostgresDatabaseService).close?.();
+  }
+  _db = null;
+  _initialized = false;
+}
+
+// Re-export types for convenience
+export type { IDatabaseService } from "./types";
+export { MemoryDatabaseService } from "./memory-store";
+export { PostgresDatabaseService, createPostgresDatabase, createPostgresPool } from "./postgres-store";
