@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
+import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
 
@@ -34,7 +35,7 @@ const createPledgeSchema = z.object({
 });
 
 // Create pledge
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const body = createPledgeSchema.parse(req.body);
 
@@ -46,7 +47,7 @@ router.post("/", async (req: Request, res: Response) => {
       chainId: null,
       campaignId: body.campaignId,
       pledgeTypeId: body.pledgeTypeId,
-      backer: req.headers["x-wallet-address"] as string || "0x0000000000000000000000000000000000000000",
+      backer: req.auth!.address,
       backerName: body.backerName || null,
       escrowedAmount: body.calculationParams?.amount || "0",
       finalAmount: null,
@@ -106,7 +107,7 @@ router.get("/:id", (req: Request, res: Response) => {
 });
 
 // Cancel pledge
-router.delete("/:id", (req: Request, res: Response) => {
+router.delete("/:id", authMiddleware(), (req: Request, res: Response) => {
   const pledge = pledges.get(req.params.id);
 
   if (!pledge) {

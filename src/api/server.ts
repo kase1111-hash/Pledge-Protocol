@@ -58,9 +58,14 @@ jobQueue.start();
 app.use(requestIdMiddleware);
 
 // CORS configuration
+// SECURITY: Require explicit CORS_ORIGINS in production
+const corsOrigins = process.env.CORS_ORIGINS?.split(",");
+if (!corsOrigins && process.env.NODE_ENV === "production") {
+  throw new Error("CORS_ORIGINS environment variable is required in production");
+}
 app.use(
   corsMiddleware({
-    origins: process.env.CORS_ORIGINS?.split(",") || ["*"],
+    origins: corsOrigins || ["http://localhost:3000", "http://localhost:5173"],
     credentials: true,
   })
 );
