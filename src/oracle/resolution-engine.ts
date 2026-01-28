@@ -165,7 +165,7 @@ export class ResolutionEngine extends EventEmitter {
       );
 
       // Mint commemoratives
-      const commemorativesMinted = await this.mintCommemoatives(
+      const commemorativesMinted = await this.mintCommemorative(
         pledges,
         campaign,
         milestoneResults
@@ -528,7 +528,7 @@ export class ResolutionEngine extends EventEmitter {
   /**
    * Mint commemorative tokens for resolved pledges
    */
-  private async mintCommemoatives(
+  private async mintCommemorative(
     pledges: PledgeForResolution[],
     campaign: CampaignForResolution,
     milestoneResults: VerificationResult[]

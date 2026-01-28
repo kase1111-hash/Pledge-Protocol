@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
+import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
 
@@ -225,7 +226,7 @@ function validatePledgeTypeConfig(pledgeType: PledgeTypeInput): { valid: boolean
 }
 
 // Create campaign
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const body = createCampaignSchema.parse(req.body);
 
@@ -283,7 +284,7 @@ router.post("/", async (req: Request, res: Response) => {
       chainId: null,
       name: body.name,
       description: body.description,
-      creator: req.headers["x-wallet-address"] as string || "0x0000000000000000000000000000000000000000",
+      creator: req.auth!.address,
       beneficiary: body.beneficiary,
       beneficiaryName: body.beneficiaryName,
       subject: body.subject || null,
@@ -384,7 +385,7 @@ router.get("/", (req: Request, res: Response) => {
 });
 
 // Activate campaign
-router.post("/:id/activate", (req: Request, res: Response) => {
+router.post("/:id/activate", authMiddleware(), (req: Request, res: Response) => {
   const campaign = campaigns.get(req.params.id);
 
   if (!campaign) {
@@ -426,7 +427,7 @@ router.post("/:id/activate", (req: Request, res: Response) => {
 });
 
 // Resolve campaign
-router.post("/:id/resolve", (req: Request, res: Response) => {
+router.post("/:id/resolve", authMiddleware(), (req: Request, res: Response) => {
   const campaign = campaigns.get(req.params.id);
 
   if (!campaign) {

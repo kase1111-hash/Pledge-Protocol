@@ -5,6 +5,7 @@
  */
 
 import { Router, Request, Response } from "express";
+import { z } from "zod";
 import {
   PaymentProcessor,
   createPaymentProcessor,
@@ -13,19 +14,82 @@ import {
 
 const router = Router();
 
-// Initialize payment processor (in production: use config from env)
+// ============================================================================
+// VALIDATION SCHEMAS
+// ============================================================================
+
+const CheckoutSchema = z.object({
+  campaignId: z.string().min(1),
+  backerAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address"),
+  amount: z.number().positive(),
+  currency: z.enum(["USD", "EUR", "GBP"]).default("USD"),
+  method: z.enum(["card", "ach", "wire", "apple_pay", "google_pay"]).optional(),
+  provider: z.enum(["stripe", "circle", "moonpay"]).optional(),
+  returnUrl: z.string().url(),
+  cancelUrl: z.string().url().optional(),
+  metadata: z.record(z.any()).optional(),
+});
+
+const RefundSchema = z.object({
+  sessionId: z.string().optional(),
+  pledgeId: z.string().optional(),
+  amount: z.number().positive().optional(),
+  reason: z.enum(["campaign_cancelled", "milestone_failed", "backer_request", "duplicate", "fraudulent", "other"]),
+  description: z.string().max(500).optional(),
+});
+
+const SubscriptionSchema = z.object({
+  campaignId: z.string().min(1),
+  backerAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address"),
+  amount: z.number().positive(),
+  currency: z.enum(["USD", "EUR", "GBP"]).default("USD"),
+  interval: z.enum(["daily", "weekly", "monthly", "yearly"]),
+  metadata: z.record(z.any()).optional(),
+});
+
+const KycSchema = z.object({
+  userAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address"),
+  provider: z.enum(["persona", "jumio", "sumsub"]).optional(),
+  level: z.enum(["basic", "standard", "enhanced"]).optional(),
+  returnUrl: z.string().url(),
+});
+
+// Helper for standardized error responses
+function errorResponse(code: string, message: string, details?: object | unknown[]) {
+  const response: { error: { code: string; message: string; details?: object | unknown[] } } = {
+    error: {
+      code,
+      message,
+    },
+  };
+  if (details) {
+    response.error.details = details;
+  }
+  return response;
+}
+
+// Initialize payment processor
+// SECURITY: Require payment credentials in production - no fallback test keys
+function getRequiredEnv(key: string): string {
+  const value = process.env[key];
+  if (!value && process.env.NODE_ENV === "production") {
+    throw new Error(`${key} environment variable is required in production`);
+  }
+  return value || "";
+}
+
 const paymentProcessor = createPaymentProcessor({
   ...DEFAULT_PAYMENT_CONFIG,
   stripe: {
-    secretKey: process.env.STRIPE_SECRET_KEY || "sk_test_xxx",
-    publishableKey: process.env.STRIPE_PUBLISHABLE_KEY || "pk_test_xxx",
-    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET || "whsec_xxx",
+    secretKey: getRequiredEnv("STRIPE_SECRET_KEY"),
+    publishableKey: getRequiredEnv("STRIPE_PUBLISHABLE_KEY"),
+    webhookSecret: getRequiredEnv("STRIPE_WEBHOOK_SECRET"),
   },
   circle: {
-    apiKey: process.env.CIRCLE_API_KEY || "circle_xxx",
-    entityId: process.env.CIRCLE_ENTITY_ID || "entity_xxx",
-    walletId: process.env.CIRCLE_WALLET_ID || "wallet_xxx",
-    webhookSecret: process.env.CIRCLE_WEBHOOK_SECRET || "circle_whsec_xxx",
+    apiKey: getRequiredEnv("CIRCLE_API_KEY"),
+    entityId: getRequiredEnv("CIRCLE_ENTITY_ID"),
+    walletId: getRequiredEnv("CIRCLE_WALLET_ID"),
+    webhookSecret: getRequiredEnv("CIRCLE_WEBHOOK_SECRET"),
   },
 });
 
@@ -39,41 +103,20 @@ const paymentProcessor = createPaymentProcessor({
  */
 router.post("/checkout", async (req: Request, res: Response) => {
   try {
-    const {
-      campaignId,
-      backerAddress,
-      amount,
-      currency = "USD",
-      method,
-      provider,
-      returnUrl,
-      cancelUrl,
-      metadata,
-    } = req.body;
-
-    if (!campaignId || !backerAddress || !amount || !returnUrl) {
-      return res.status(400).json({
-        error: "Missing required fields: campaignId, backerAddress, amount, returnUrl",
-      });
+    const parsed = CheckoutSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json(
+        errorResponse("INVALID_REQUEST", "Invalid request body", parsed.error.errors)
+      );
     }
 
-    const result = await paymentProcessor.createCheckout({
-      campaignId,
-      backerAddress,
-      amount,
-      currency,
-      method,
-      provider,
-      returnUrl,
-      cancelUrl,
-      metadata,
-    });
+    const result = await paymentProcessor.createCheckout(parsed.data);
 
     res.status(201).json(result);
   } catch (error) {
-    res.status(500).json({
-      error: error instanceof Error ? error.message : "Checkout creation failed",
-    });
+    res.status(500).json(
+      errorResponse("CHECKOUT_FAILED", error instanceof Error ? error.message : "Checkout creation failed")
+    );
   }
 });
 
@@ -86,9 +129,9 @@ router.get("/checkout/:sessionId", async (req: Request, res: Response) => {
     const session = await paymentProcessor.getCheckout(req.params.sessionId);
     res.json(session);
   } catch (error) {
-    res.status(404).json({
-      error: error instanceof Error ? error.message : "Session not found",
-    });
+    res.status(404).json(
+      errorResponse("SESSION_NOT_FOUND", error instanceof Error ? error.message : "Session not found")
+    );
   }
 });
 
@@ -176,25 +219,20 @@ router.get("/settlements/:settlementId", async (req: Request, res: Response) => 
  */
 router.post("/refunds", async (req: Request, res: Response) => {
   try {
-    const { sessionId, pledgeId, amount, reason, description } = req.body;
-
-    if (!reason) {
-      return res.status(400).json({ error: "Refund reason is required" });
+    const parsed = RefundSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json(
+        errorResponse("INVALID_REQUEST", "Invalid request body", parsed.error.errors)
+      );
     }
 
-    const refund = await paymentProcessor.createRefund({
-      sessionId,
-      pledgeId,
-      amount,
-      reason,
-      description,
-    });
+    const refund = await paymentProcessor.createRefund(parsed.data);
 
     res.status(201).json(refund);
   } catch (error) {
-    res.status(500).json({
-      error: error instanceof Error ? error.message : "Refund creation failed",
-    });
+    res.status(500).json(
+      errorResponse("REFUND_FAILED", error instanceof Error ? error.message : "Refund creation failed")
+    );
   }
 });
 
@@ -223,29 +261,20 @@ router.get("/refunds/:refundId", async (req: Request, res: Response) => {
  */
 router.post("/subscriptions", async (req: Request, res: Response) => {
   try {
-    const { campaignId, backerAddress, amount, currency, interval, metadata } =
-      req.body;
-
-    if (!campaignId || !backerAddress || !amount || !interval) {
-      return res.status(400).json({
-        error: "Missing required fields: campaignId, backerAddress, amount, interval",
-      });
+    const parsed = SubscriptionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json(
+        errorResponse("INVALID_REQUEST", "Invalid request body", parsed.error.errors)
+      );
     }
 
-    const subscription = await paymentProcessor.createSubscription({
-      campaignId,
-      backerAddress,
-      amount,
-      currency: currency || "USD",
-      interval,
-      metadata,
-    });
+    const subscription = await paymentProcessor.createSubscription(parsed.data);
 
     res.status(201).json(subscription);
   } catch (error) {
-    res.status(500).json({
-      error: error instanceof Error ? error.message : "Subscription creation failed",
-    });
+    res.status(500).json(
+      errorResponse("SUBSCRIPTION_FAILED", error instanceof Error ? error.message : "Subscription creation failed")
+    );
   }
 });
 
@@ -318,26 +347,20 @@ router.delete("/methods/:methodId", async (req: Request, res: Response) => {
  */
 router.post("/kyc", async (req: Request, res: Response) => {
   try {
-    const { userAddress, provider, level, returnUrl } = req.body;
-
-    if (!userAddress || !returnUrl) {
-      return res.status(400).json({
-        error: "Missing required fields: userAddress, returnUrl",
-      });
+    const parsed = KycSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json(
+        errorResponse("INVALID_REQUEST", "Invalid request body", parsed.error.errors)
+      );
     }
 
-    const result = await paymentProcessor.initiateKyc({
-      userAddress,
-      provider,
-      level,
-      returnUrl,
-    });
+    const result = await paymentProcessor.initiateKyc(parsed.data);
 
     res.json(result);
   } catch (error) {
-    res.status(500).json({
-      error: error instanceof Error ? error.message : "KYC initiation failed",
-    });
+    res.status(500).json(
+      errorResponse("KYC_FAILED", error instanceof Error ? error.message : "KYC initiation failed")
+    );
   }
 });
 
