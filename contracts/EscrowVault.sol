@@ -35,6 +35,12 @@ contract EscrowVault is IEscrowVault, AccessControl, ReentrancyGuard {
     /// @notice Mapping of campaign ID to array of pledge IDs
     mapping(bytes32 => bytes32[]) private campaignPledgeIds;
 
+    /// @notice Mapping of address to pending withdrawal balance (pull-payment pattern)
+    mapping(address => uint256) private pendingWithdrawals;
+
+    /// @notice Total pending withdrawals across all addresses
+    uint256 private totalPendingWithdrawals;
+
     constructor(address _campaignRegistry) {
         require(_campaignRegistry != address(0), "Invalid registry address");
         campaignRegistry = ICampaignRegistry(_campaignRegistry);
@@ -67,7 +73,7 @@ contract EscrowVault is IEscrowVault, AccessControl, ReentrancyGuard {
         emit Deposited(campaignId, pledgeId, backer, msg.value);
     }
 
-    /// @notice Releases funds to the beneficiary
+    /// @notice Releases funds to the beneficiary (uses pull-payment pattern)
     function release(
         bytes32 campaignId,
         bytes32 pledgeId,
@@ -86,13 +92,13 @@ contract EscrowVault is IEscrowVault, AccessControl, ReentrancyGuard {
         escrow.released = true;
         campaignBalances[campaignId] -= amount;
 
-        (bool success, ) = beneficiary.call{value: amount}("");
-        require(success, "Transfer failed");
+        // Credit beneficiary for pull-payment instead of direct transfer
+        _creditWithdrawal(beneficiary, amount);
 
         emit Released(campaignId, pledgeId, beneficiary, amount);
     }
 
-    /// @notice Refunds funds to the backer
+    /// @notice Refunds funds to the backer (uses pull-payment pattern)
     function refund(
         bytes32 campaignId,
         bytes32 pledgeId
@@ -109,13 +115,13 @@ contract EscrowVault is IEscrowVault, AccessControl, ReentrancyGuard {
         escrow.refunded = true;
         campaignBalances[campaignId] -= amount;
 
-        (bool success, ) = backer.call{value: amount}("");
-        require(success, "Transfer failed");
+        // Credit backer for pull-payment instead of direct transfer
+        _creditWithdrawal(backer, amount);
 
         emit Refunded(campaignId, pledgeId, backer, amount);
     }
 
-    /// @notice Partial release and refund for per-unit pledges
+    /// @notice Partial release and refund for per-unit pledges (uses pull-payment pattern)
     function partialRelease(
         bytes32 campaignId,
         bytes32 pledgeId,
@@ -135,19 +141,44 @@ contract EscrowVault is IEscrowVault, AccessControl, ReentrancyGuard {
         escrow.released = true;
         campaignBalances[campaignId] -= escrow.amount;
 
-        // Release to beneficiary
+        // Credit beneficiary for pull-payment
         if (releaseAmount > 0) {
-            (bool successRelease, ) = beneficiary.call{value: releaseAmount}("");
-            require(successRelease, "Release transfer failed");
+            _creditWithdrawal(beneficiary, releaseAmount);
             emit Released(campaignId, pledgeId, beneficiary, releaseAmount);
         }
 
-        // Refund to backer
+        // Credit backer for pull-payment
         if (refundAmount > 0) {
-            (bool successRefund, ) = escrow.backer.call{value: refundAmount}("");
-            require(successRefund, "Refund transfer failed");
+            _creditWithdrawal(escrow.backer, refundAmount);
             emit Refunded(campaignId, pledgeId, escrow.backer, refundAmount);
         }
+    }
+
+    /// @notice Withdraws pending balance (pull-payment pattern)
+    /// @dev Allows recipients to pull their funds instead of push
+    function withdraw() external nonReentrant {
+        uint256 amount = pendingWithdrawals[msg.sender];
+        require(amount > 0, "No funds to withdraw");
+
+        pendingWithdrawals[msg.sender] = 0;
+        totalPendingWithdrawals -= amount;
+
+        (bool success, ) = msg.sender.call{value: amount}("");
+        require(success, "Withdrawal failed");
+
+        emit Withdrawn(msg.sender, amount);
+    }
+
+    /// @notice Gets pending withdrawal balance for an address
+    function pendingWithdrawal(address account) external view returns (uint256) {
+        return pendingWithdrawals[account];
+    }
+
+    /// @notice Internal function to credit withdrawal balance
+    function _creditWithdrawal(address recipient, uint256 amount) private {
+        pendingWithdrawals[recipient] += amount;
+        totalPendingWithdrawals += amount;
+        emit WithdrawalCredited(recipient, amount);
     }
 
     /// @notice Gets the total balance for a campaign

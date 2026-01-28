@@ -40,6 +40,12 @@ contract PledgeManager is IPledgeManager, AccessControl, ReentrancyGuard {
     /// @notice Token ID counter
     uint256 private tokenIdCounter;
 
+    /// @notice Maximum pledges to process in a single batch (gas limit protection)
+    uint256 public constant MAX_BATCH_SIZE = 100;
+
+    /// @notice Tracks resolution progress for campaigns (for paginated resolution)
+    mapping(bytes32 => uint256) private campaignResolutionIndex;
+
     constructor(
         address _campaignRegistry,
         address _escrowVault,
@@ -207,12 +213,86 @@ contract PledgeManager is IPledgeManager, AccessControl, ReentrancyGuard {
         emit PledgeResolved(pledgeId, releaseAmount, refundAmount);
     }
 
-    /// @notice Batch resolve all pledges for a campaign
+    /// @notice Batch resolve pledges for a campaign with gas limit protection
+    /// @param campaignId The campaign ID
+    /// @param milestoneCompleted Whether the milestone was completed
+    /// @param batchSize Number of pledges to process (0 = use MAX_BATCH_SIZE)
+    /// @return processedCount Number of pledges processed in this batch
+    /// @return isComplete Whether all pledges have been processed
+    function resolvePledgesBatch(
+        bytes32 campaignId,
+        bool milestoneCompleted,
+        uint256 batchSize
+    ) external onlyRole(RESOLVER_ROLE) nonReentrant returns (uint256 processedCount, bool isComplete) {
+        bytes32[] memory pledgeIds = campaignPledges[campaignId];
+        uint256 startIndex = campaignResolutionIndex[campaignId];
+
+        // Limit batch size to prevent gas exhaustion
+        uint256 effectiveBatchSize = batchSize == 0 ? MAX_BATCH_SIZE : batchSize;
+        if (effectiveBatchSize > MAX_BATCH_SIZE) {
+            effectiveBatchSize = MAX_BATCH_SIZE;
+        }
+
+        uint256 totalReleased = 0;
+        uint256 totalRefunded = 0;
+        uint256 endIndex = startIndex + effectiveBatchSize;
+        if (endIndex > pledgeIds.length) {
+            endIndex = pledgeIds.length;
+        }
+
+        for (uint256 i = startIndex; i < endIndex; i++) {
+            bytes32 pledgeId = pledgeIds[i];
+            Pledge storage pledge = pledges[pledgeId];
+
+            if (pledge.status != PledgeStatus.Active) {
+                processedCount++;
+                continue;
+            }
+
+            pledge.resolvedAt = block.timestamp;
+
+            if (milestoneCompleted) {
+                // Release full amount to beneficiary
+                pledge.status = PledgeStatus.Resolved;
+                pledge.finalAmount = pledge.escrowedAmount;
+                escrowVault.release(campaignId, pledgeId, pledge.escrowedAmount);
+                totalReleased += pledge.escrowedAmount;
+
+                emit PledgeResolved(pledgeId, pledge.escrowedAmount, 0);
+            } else {
+                // Refund full amount to backer
+                pledge.status = PledgeStatus.Refunded;
+                pledge.finalAmount = 0;
+                escrowVault.refund(campaignId, pledgeId);
+                totalRefunded += pledge.escrowedAmount;
+
+                emit PledgeRefunded(pledgeId, pledge.escrowedAmount);
+            }
+            processedCount++;
+        }
+
+        // Update progress
+        campaignResolutionIndex[campaignId] = endIndex;
+        isComplete = endIndex >= pledgeIds.length;
+
+        // Update campaign as resolved only when complete
+        if (isComplete) {
+            campaignRegistry.resolveCampaign(campaignId, totalReleased, totalRefunded);
+            // Reset index for potential future use
+            campaignResolutionIndex[campaignId] = 0;
+        }
+    }
+
+    /// @notice Batch resolve all pledges for a campaign (legacy function with gas limit)
+    /// @dev Processes up to MAX_BATCH_SIZE pledges. Call repeatedly for larger campaigns.
     function resolveAllPledges(
         bytes32 campaignId,
         bool milestoneCompleted
     ) external onlyRole(RESOLVER_ROLE) nonReentrant {
         bytes32[] memory pledgeIds = campaignPledges[campaignId];
+
+        // Enforce batch limit to prevent gas exhaustion
+        require(pledgeIds.length <= MAX_BATCH_SIZE, "Too many pledges, use resolvePledgesBatch");
 
         uint256 totalReleased = 0;
         uint256 totalRefunded = 0;
@@ -248,6 +328,11 @@ contract PledgeManager is IPledgeManager, AccessControl, ReentrancyGuard {
 
         // Update campaign as resolved
         campaignRegistry.resolveCampaign(campaignId, totalReleased, totalRefunded);
+    }
+
+    /// @notice Gets the current resolution progress for a campaign
+    function getResolutionProgress(bytes32 campaignId) external view returns (uint256 processed, uint256 total) {
+        return (campaignResolutionIndex[campaignId], campaignPledges[campaignId].length);
     }
 
     /// @notice Cancels a pledge (if allowed)

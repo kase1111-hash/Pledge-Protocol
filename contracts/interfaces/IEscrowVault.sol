@@ -30,6 +30,18 @@ interface IEscrowVault {
         uint256 amount
     );
 
+    /// @notice Emitted when funds are credited for withdrawal (pull-payment)
+    event WithdrawalCredited(
+        address indexed recipient,
+        uint256 amount
+    );
+
+    /// @notice Emitted when funds are withdrawn (pull-payment)
+    event Withdrawn(
+        address indexed recipient,
+        uint256 amount
+    );
+
     /// @notice Deposits funds for a pledge
     function deposit(
         bytes32 campaignId,
@@ -57,6 +69,12 @@ interface IEscrowVault {
         uint256 releaseAmount,
         uint256 refundAmount
     ) external;
+
+    /// @notice Withdraws pending balance (pull-payment pattern)
+    function withdraw() external;
+
+    /// @notice Gets pending withdrawal balance for an address
+    function pendingWithdrawal(address account) external view returns (uint256);
 
     /// @notice Gets the total balance for a campaign
     function getCampaignBalance(bytes32 campaignId) external view returns (uint256);
