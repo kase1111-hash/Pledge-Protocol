@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { OrganizationService, createOrganizationService } from "../../enterprise";
+import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
 
@@ -20,7 +21,7 @@ const orgService = createOrganizationService();
  * Create organization
  * POST /v1/enterprise/orgs
  */
-router.post("/orgs", async (req: Request, res: Response) => {
+router.post("/orgs", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const {
       name,
@@ -111,7 +112,7 @@ router.get("/orgs/user/:address", async (req: Request, res: Response) => {
  * Update organization
  * PUT /v1/enterprise/orgs/:orgId
  */
-router.put("/orgs/:orgId", async (req: Request, res: Response) => {
+router.put("/orgs/:orgId", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const actorAddress = req.body.actorAddress || req.headers["x-user-address"];
     if (!actorAddress) {
@@ -136,7 +137,7 @@ router.put("/orgs/:orgId", async (req: Request, res: Response) => {
  * Update organization settings
  * PUT /v1/enterprise/orgs/:orgId/settings
  */
-router.put("/orgs/:orgId/settings", async (req: Request, res: Response) => {
+router.put("/orgs/:orgId/settings", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const actorAddress = req.body.actorAddress || req.headers["x-user-address"];
     if (!actorAddress) {
@@ -180,7 +181,7 @@ router.get("/orgs/:orgId/members", async (req: Request, res: Response) => {
  * Add team member
  * POST /v1/enterprise/orgs/:orgId/members
  */
-router.post("/orgs/:orgId/members", async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/members", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { userAddress, role, displayName, email, invitedBy } = req.body;
 
@@ -212,6 +213,7 @@ router.post("/orgs/:orgId/members", async (req: Request, res: Response) => {
  */
 router.put(
   "/orgs/:orgId/members/:address/role",
+  authMiddleware(),
   async (req: Request, res: Response) => {
     try {
       const { role, actorAddress } = req.body;
@@ -244,6 +246,7 @@ router.put(
  */
 router.delete(
   "/orgs/:orgId/members/:address",
+  authMiddleware(),
   async (req: Request, res: Response) => {
     try {
       const actorAddress =
@@ -277,7 +280,7 @@ router.delete(
  * Create team invite
  * POST /v1/enterprise/orgs/:orgId/invites
  */
-router.post("/orgs/:orgId/invites", async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/invites", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { email, role, invitedBy } = req.body;
 
@@ -305,7 +308,7 @@ router.post("/orgs/:orgId/invites", async (req: Request, res: Response) => {
  * Accept invite
  * POST /v1/enterprise/invites/:token/accept
  */
-router.post("/invites/:token/accept", async (req: Request, res: Response) => {
+router.post("/invites/:token/accept", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { userAddress } = req.body;
 
@@ -345,7 +348,7 @@ router.get("/orgs/:orgId/invites", async (req: Request, res: Response) => {
  * Configure SSO
  * POST /v1/enterprise/orgs/:orgId/sso
  */
-router.post("/orgs/:orgId/sso", async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/sso", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const config = orgService.configureSso(req.params.orgId, req.body);
     res.status(201).json(config);
@@ -378,7 +381,7 @@ router.get("/orgs/:orgId/sso", async (req: Request, res: Response) => {
  * Validate SSO session
  * POST /v1/enterprise/orgs/:orgId/sso/validate
  */
-router.post("/orgs/:orgId/sso/validate", async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/sso/validate", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { externalUserId, email } = req.body;
 
@@ -428,7 +431,7 @@ router.get("/orgs/:orgId/billing", async (req: Request, res: Response) => {
  * Upgrade plan
  * POST /v1/enterprise/orgs/:orgId/billing/upgrade
  */
-router.post("/orgs/:orgId/billing/upgrade", async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/billing/upgrade", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { plan, cycle, actorAddress } = req.body;
 
@@ -461,7 +464,7 @@ router.post("/orgs/:orgId/billing/upgrade", async (req: Request, res: Response) 
  * Create bulk operation
  * POST /v1/enterprise/orgs/:orgId/bulk
  */
-router.post("/orgs/:orgId/bulk", async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/bulk", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { type, inputData, createdBy } = req.body;
 
@@ -529,7 +532,7 @@ router.get("/orgs/:orgId/bulk", async (req: Request, res: Response) => {
  * Create API key
  * POST /v1/enterprise/orgs/:orgId/api-keys
  */
-router.post("/orgs/:orgId/api-keys", async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/api-keys", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { name, permissions, createdBy, expiresAt } = req.body;
 
@@ -589,6 +592,7 @@ router.get("/orgs/:orgId/api-keys", async (req: Request, res: Response) => {
  */
 router.post(
   "/orgs/:orgId/api-keys/:keyId/revoke",
+  authMiddleware(),
   async (req: Request, res: Response) => {
     try {
       const actorAddress =

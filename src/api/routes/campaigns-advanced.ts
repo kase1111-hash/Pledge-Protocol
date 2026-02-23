@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { advancedCampaignService } from "../../campaigns-advanced";
+import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
 
@@ -17,7 +18,7 @@ const router = Router();
  * POST /campaigns/advanced/recurring
  * Create a recurring campaign
  */
-router.post("/recurring", (req: Request, res: Response) => {
+router.post("/recurring", authMiddleware(), (req: Request, res: Response) => {
   try {
     const recurring = advancedCampaignService.createRecurringCampaign(req.body);
     res.status(201).json(recurring);
@@ -58,7 +59,7 @@ router.get("/recurring/:id", (req: Request, res: Response) => {
  * PUT /campaigns/advanced/recurring/:id
  * Update recurring campaign settings
  */
-router.put("/recurring/:id", (req: Request, res: Response) => {
+router.put("/recurring/:id", authMiddleware(), (req: Request, res: Response) => {
   try {
     const updated = advancedCampaignService.updateRecurringCampaign(
       req.params.id,
@@ -76,7 +77,7 @@ router.put("/recurring/:id", (req: Request, res: Response) => {
  * POST /campaigns/advanced/recurring/:id/pause
  * Pause recurring campaign
  */
-router.post("/recurring/:id/pause", (req: Request, res: Response) => {
+router.post("/recurring/:id/pause", authMiddleware(), (req: Request, res: Response) => {
   try {
     const paused = advancedCampaignService.pauseRecurringCampaign(req.params.id);
     res.json(paused);
@@ -91,7 +92,7 @@ router.post("/recurring/:id/pause", (req: Request, res: Response) => {
  * POST /campaigns/advanced/recurring/:id/resume
  * Resume recurring campaign
  */
-router.post("/recurring/:id/resume", (req: Request, res: Response) => {
+router.post("/recurring/:id/resume", authMiddleware(), (req: Request, res: Response) => {
   try {
     const resumed = advancedCampaignService.resumeRecurringCampaign(req.params.id);
     res.json(resumed);
@@ -106,7 +107,7 @@ router.post("/recurring/:id/resume", (req: Request, res: Response) => {
  * POST /campaigns/advanced/recurring/:id/cancel
  * Cancel recurring campaign
  */
-router.post("/recurring/:id/cancel", (req: Request, res: Response) => {
+router.post("/recurring/:id/cancel", authMiddleware(), (req: Request, res: Response) => {
   try {
     const cancelled = advancedCampaignService.cancelRecurringCampaign(req.params.id);
     res.json(cancelled);
@@ -121,7 +122,7 @@ router.post("/recurring/:id/cancel", (req: Request, res: Response) => {
  * POST /campaigns/advanced/recurring/:id/instance
  * Create next instance
  */
-router.post("/recurring/:id/instance", (req: Request, res: Response) => {
+router.post("/recurring/:id/instance", authMiddleware(), (req: Request, res: Response) => {
   try {
     const instance = advancedCampaignService.createNextInstance(req.params.id);
     res.status(201).json(instance);
@@ -140,7 +141,7 @@ router.post("/recurring/:id/instance", (req: Request, res: Response) => {
  * POST /campaigns/advanced/:campaignId/stretch-goals
  * Add a stretch goal
  */
-router.post("/:campaignId/stretch-goals", (req: Request, res: Response) => {
+router.post("/:campaignId/stretch-goals", authMiddleware(), (req: Request, res: Response) => {
   try {
     const goal = advancedCampaignService.addStretchGoal(
       req.params.campaignId,
@@ -178,7 +179,7 @@ router.get("/:campaignId/stretch-goals/progress", (req: Request, res: Response) 
  * PUT /campaigns/advanced/stretch-goals/:goalId
  * Update stretch goal
  */
-router.put("/stretch-goals/:goalId", (req: Request, res: Response) => {
+router.put("/stretch-goals/:goalId", authMiddleware(), (req: Request, res: Response) => {
   try {
     const updated = advancedCampaignService.updateStretchGoal(
       req.params.goalId,
@@ -196,7 +197,7 @@ router.put("/stretch-goals/:goalId", (req: Request, res: Response) => {
  * DELETE /campaigns/advanced/stretch-goals/:goalId
  * Remove stretch goal
  */
-router.delete("/stretch-goals/:goalId", (req: Request, res: Response) => {
+router.delete("/stretch-goals/:goalId", authMiddleware(), (req: Request, res: Response) => {
   const success = advancedCampaignService.removeStretchGoal(req.params.goalId);
 
   if (success) {
@@ -214,7 +215,7 @@ router.delete("/stretch-goals/:goalId", (req: Request, res: Response) => {
  * POST /campaigns/advanced/:campaignId/schedule/launch
  * Schedule campaign launch
  */
-router.post("/:campaignId/schedule/launch", (req: Request, res: Response) => {
+router.post("/:campaignId/schedule/launch", authMiddleware(), (req: Request, res: Response) => {
   try {
     const { launchDate, settings } = req.body;
 
@@ -235,7 +236,7 @@ router.post("/:campaignId/schedule/launch", (req: Request, res: Response) => {
  * POST /campaigns/advanced/:campaignId/schedule/action
  * Schedule an action
  */
-router.post("/:campaignId/schedule/action", (req: Request, res: Response) => {
+router.post("/:campaignId/schedule/action", authMiddleware(), (req: Request, res: Response) => {
   try {
     const { type, scheduledFor, params, createdBy } = req.body;
 
@@ -269,7 +270,7 @@ router.get("/:campaignId/schedule", (req: Request, res: Response) => {
  * DELETE /campaigns/advanced/schedule/:actionId
  * Cancel scheduled action
  */
-router.delete("/schedule/:actionId", (req: Request, res: Response) => {
+router.delete("/schedule/:actionId", authMiddleware(), (req: Request, res: Response) => {
   const success = advancedCampaignService.cancelScheduledAction(
     req.params.actionId
   );
@@ -285,7 +286,7 @@ router.delete("/schedule/:actionId", (req: Request, res: Response) => {
  * POST /campaigns/advanced/schedule/process
  * Process due scheduled actions (admin)
  */
-router.post("/schedule/process", async (_req: Request, res: Response) => {
+router.post("/schedule/process", authMiddleware(), async (_req: Request, res: Response) => {
   try {
     const processed = await advancedCampaignService.processScheduledActions();
     res.json({
@@ -307,7 +308,7 @@ router.post("/schedule/process", async (_req: Request, res: Response) => {
  * POST /campaigns/advanced/series
  * Create a campaign series
  */
-router.post("/series", (req: Request, res: Response) => {
+router.post("/series", authMiddleware(), (req: Request, res: Response) => {
   try {
     const series = advancedCampaignService.createSeries(req.body);
     res.status(201).json(series);
@@ -336,7 +337,7 @@ router.get("/series/:seriesId", (req: Request, res: Response) => {
  * POST /campaigns/advanced/series/:seriesId/campaigns
  * Add campaign to series
  */
-router.post("/series/:seriesId/campaigns", (req: Request, res: Response) => {
+router.post("/series/:seriesId/campaigns", authMiddleware(), (req: Request, res: Response) => {
   try {
     const { campaignId, relationship } = req.body;
 
@@ -357,7 +358,7 @@ router.post("/series/:seriesId/campaigns", (req: Request, res: Response) => {
  * DELETE /campaigns/advanced/series/:seriesId/campaigns/:campaignId
  * Remove campaign from series
  */
-router.delete("/series/:seriesId/campaigns/:campaignId", (req: Request, res: Response) => {
+router.delete("/series/:seriesId/campaigns/:campaignId", authMiddleware(), (req: Request, res: Response) => {
   try {
     const updated = advancedCampaignService.removeCampaignFromSeries(
       req.params.seriesId,
@@ -395,7 +396,7 @@ router.get("/:campaignId/series", (req: Request, res: Response) => {
  * POST /campaigns/advanced/milestones/:milestoneId/schedule
  * Schedule milestone verification
  */
-router.post("/milestones/:milestoneId/schedule", (req: Request, res: Response) => {
+router.post("/milestones/:milestoneId/schedule", authMiddleware(), (req: Request, res: Response) => {
   try {
     const { scheduledDate, autoVerify } = req.body;
 
@@ -416,7 +417,7 @@ router.post("/milestones/:milestoneId/schedule", (req: Request, res: Response) =
  * POST /campaigns/advanced/milestones/:milestoneId/reminder
  * Add milestone reminder
  */
-router.post("/milestones/:milestoneId/reminder", (req: Request, res: Response) => {
+router.post("/milestones/:milestoneId/reminder", authMiddleware(), (req: Request, res: Response) => {
   try {
     const reminder = advancedCampaignService.addMilestoneReminder(
       req.params.milestoneId,

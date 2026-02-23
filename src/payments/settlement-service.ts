@@ -3,9 +3,11 @@
  *
  * Handles conversion of fiat payments to stablecoin (USDC)
  * and settlement to smart contract escrow.
+ * Uses ethers.js for real blockchain transactions.
  */
 
 import { randomUUID } from "crypto";
+import { JsonRpcProvider, Wallet, Contract, parseUnits, formatUnits } from "ethers";
 import {
   Settlement,
   SettlementRequest,
@@ -27,6 +29,9 @@ export interface SettlementConfig {
   minSettlementAmount: string; // Minimum amount to settle
   batchingEnabled: boolean; // Batch multiple settlements
   batchIntervalMs: number; // How often to process batch
+  rpcUrls: Record<number, string>; // Chain ID -> RPC URL
+  privateKey?: string; // Settlement wallet private key
+  blockConfirmations: number; // Number of confirmations to wait
 }
 
 export interface ExchangeRate {
@@ -48,6 +53,14 @@ export interface SettlementBatch {
   processedAt?: number;
 }
 
+// Minimal ERC20 ABI for transfers
+const ERC20_ABI = [
+  "function transfer(address to, uint256 amount) returns (bool)",
+  "function balanceOf(address account) view returns (uint256)",
+  "function approve(address spender, uint256 amount) returns (bool)",
+  "function allowance(address owner, address spender) view returns (uint256)",
+];
+
 // ============================================================================
 // SETTLEMENT SERVICE
 // ============================================================================
@@ -58,10 +71,38 @@ export class SettlementService {
   private batches: Map<string, SettlementBatch> = new Map();
   private exchangeRates: Map<string, ExchangeRate> = new Map();
   private pendingSettlements: Settlement[] = [];
+  private providers: Map<number, JsonRpcProvider> = new Map();
 
   constructor(config: SettlementConfig) {
     this.config = config;
     this.initializeExchangeRates();
+    this.initializeProviders();
+  }
+
+  // ==========================================================================
+  // PROVIDERS
+  // ==========================================================================
+
+  private initializeProviders(): void {
+    for (const [chainIdStr, rpcUrl] of Object.entries(this.config.rpcUrls)) {
+      const chainId = parseInt(chainIdStr);
+      this.providers.set(chainId, new JsonRpcProvider(rpcUrl));
+    }
+  }
+
+  private getProvider(chainId: number): JsonRpcProvider {
+    const provider = this.providers.get(chainId);
+    if (!provider) {
+      throw new Error(`No RPC provider configured for chain ${chainId}`);
+    }
+    return provider;
+  }
+
+  private getWallet(chainId: number): Wallet {
+    if (!this.config.privateKey) {
+      throw new Error("Settlement wallet private key not configured");
+    }
+    return new Wallet(this.config.privateKey, this.getProvider(chainId));
   }
 
   // ==========================================================================
@@ -72,13 +113,13 @@ export class SettlementService {
     const now = Date.now();
     const validFor = 5 * 60 * 1000; // 5 minutes
 
-    // Default rates (1:1 for stablecoins)
+    // Default rates — in production, fetch from CoinGecko/Chainlink
     const rates: ExchangeRate[] = [
       {
         fromCurrency: "USD",
         toCurrency: "USDC",
         rate: "1.000000",
-        source: "circle",
+        source: "default",
         timestamp: now,
         validUntil: now + validFor,
       },
@@ -86,15 +127,15 @@ export class SettlementService {
         fromCurrency: "USD",
         toCurrency: "USDT",
         rate: "1.000000",
-        source: "circle",
+        source: "default",
         timestamp: now,
         validUntil: now + validFor,
       },
       {
         fromCurrency: "EUR",
         toCurrency: "USDC",
-        rate: "1.085000", // EUR is stronger
-        source: "circle",
+        rate: "1.085000",
+        source: "default",
         timestamp: now,
         validUntil: now + validFor,
       },
@@ -102,15 +143,7 @@ export class SettlementService {
         fromCurrency: "GBP",
         toCurrency: "USDC",
         rate: "1.270000",
-        source: "circle",
-        timestamp: now,
-        validUntil: now + validFor,
-      },
-      {
-        fromCurrency: "USD",
-        toCurrency: "ETH",
-        rate: "0.000400", // ~$2500/ETH
-        source: "chainlink",
+        source: "default",
         timestamp: now,
         validUntil: now + validFor,
       },
@@ -131,7 +164,7 @@ export class SettlementService {
 
     // Check if rate is still valid
     if (rate && rate.validUntil < Date.now()) {
-      // In production: fetch fresh rate from API
+      // Refresh rates (in production: fetch from API)
       this.initializeExchangeRates();
       return this.exchangeRates.get(key);
     }
@@ -140,7 +173,8 @@ export class SettlementService {
   }
 
   async refreshExchangeRates(): Promise<void> {
-    // In production: fetch from Circle, Chainlink, etc.
+    // In production: fetch real-time rates from CoinGecko, Chainlink, etc.
+    // For now, reinitialize with defaults
     this.initializeExchangeRates();
   }
 
@@ -213,37 +247,45 @@ export class SettlementService {
     settlement.status = "converting";
 
     try {
-      // Step 1: Convert fiat to USDC via Circle
-      // In production: Circle API call
-      await this.simulateConversion(settlement);
+      // Step 1: Get a wallet for the target chain
+      const wallet = this.getWallet(settlement.destinationChainId);
 
-      // Step 2: Transfer USDC to escrow contract
-      // In production: blockchain transaction
-      const txHash = await this.simulateBlockchainTransfer(settlement);
+      // Step 2: Get the USDC token contract on the target chain
+      const usdcAddress = this.getUsdcAddress(settlement.destinationChainId);
+      const usdcContract = new Contract(usdcAddress, ERC20_ABI, wallet);
+
+      // Step 3: Estimate gas for the transfer
+      const amount = BigInt(settlement.destinationAmount);
+      const gasEstimate = await usdcContract.transfer.estimateGas(
+        settlement.destinationAddress,
+        amount
+      );
+
+      // Step 4: Execute the on-chain transfer
+      const tx = await usdcContract.transfer(
+        settlement.destinationAddress,
+        amount,
+        { gasLimit: gasEstimate * 120n / 100n } // 20% gas buffer
+      );
+
+      settlement.txHash = tx.hash;
+      settlement.convertedAt = Date.now();
+
+      // Step 5: Wait for block confirmations
+      const receipt = await tx.wait(this.config.blockConfirmations);
+
+      if (!receipt || receipt.status === 0) {
+        throw new Error("Transaction reverted on-chain");
+      }
 
       settlement.status = "settled";
-      settlement.txHash = txHash;
+      settlement.blockNumber = receipt.blockNumber;
       settlement.settledAt = Date.now();
     } catch (error) {
       settlement.status = "failed";
     }
 
     return settlement;
-  }
-
-  private async simulateConversion(settlement: Settlement): Promise<void> {
-    // Simulate conversion delay
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    settlement.convertedAt = Date.now();
-  }
-
-  private async simulateBlockchainTransfer(
-    settlement: Settlement
-  ): Promise<string> {
-    // Simulate blockchain delay
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    settlement.blockNumber = Math.floor(Date.now() / 1000);
-    return `0x${randomUUID().replace(/-/g, "")}`;
   }
 
   // ==========================================================================
@@ -275,27 +317,39 @@ export class SettlementService {
 
     this.batches.set(batchId, batch);
 
-    // Process batch
+    // Process batch as single transaction
     batch.status = "processing";
 
     try {
-      // Update all settlements
       for (const settlement of settlements) {
         settlement.status = "converting";
       }
 
-      // Simulate batch conversion and transfer
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Execute a single large transfer to the escrow contract
+      const chainId = settlements[0].destinationChainId;
+      const wallet = this.getWallet(chainId);
+      const usdcAddress = this.getUsdcAddress(chainId);
+      const usdcContract = new Contract(usdcAddress, ERC20_ABI, wallet);
 
-      const txHash = `0x${randomUUID().replace(/-/g, "")}`;
-      batch.txHash = txHash;
+      const tx = await usdcContract.transfer(
+        this.config.escrowContractAddress,
+        totalAmount
+      );
+
+      batch.txHash = tx.hash;
+
+      const receipt = await tx.wait(this.config.blockConfirmations);
+      if (!receipt || receipt.status === 0) {
+        throw new Error("Batch transaction reverted on-chain");
+      }
+
       batch.status = "completed";
       batch.processedAt = Date.now();
 
-      // Update all settlements
       for (const settlement of settlements) {
         settlement.status = "settled";
-        settlement.txHash = txHash;
+        settlement.txHash = tx.hash;
+        settlement.blockNumber = receipt.blockNumber;
         settlement.settledAt = Date.now();
       }
     } catch (error) {
@@ -357,7 +411,8 @@ export class SettlementService {
       throw new Error("Can only reverse settled settlements");
     }
 
-    // In production: blockchain transaction to return funds
+    // In production: execute on-chain reversal transaction
+    // This would call a refund function on the escrow contract
     settlement.status = "reversed";
     return settlement;
   }
@@ -417,7 +472,7 @@ export class SettlementService {
   // ==========================================================================
 
   /**
-   * Verify settlement was received by escrow contract
+   * Verify settlement was received by escrow contract on-chain
    */
   async verifyEscrowDeposit(
     settlementId: string
@@ -427,35 +482,89 @@ export class SettlementService {
       return { verified: false };
     }
 
-    // In production: query blockchain for escrow contract balance
-    return {
-      verified: settlement.status === "settled",
-      balance: settlement.destinationAmount,
-    };
+    try {
+      const provider = this.getProvider(settlement.destinationChainId);
+      const receipt = await provider.getTransactionReceipt(settlement.txHash);
+
+      if (!receipt || receipt.status === 0) {
+        return { verified: false };
+      }
+
+      // Query on-chain balance at escrow address
+      const usdcAddress = this.getUsdcAddress(settlement.destinationChainId);
+      const usdcContract = new Contract(usdcAddress, ERC20_ABI, provider);
+      const balance: bigint = await usdcContract.balanceOf(settlement.destinationAddress);
+
+      return {
+        verified: true,
+        balance: balance.toString(),
+      };
+    } catch {
+      return { verified: false };
+    }
   }
 
   /**
-   * Get escrow balance for a campaign
+   * Get escrow balance for a campaign from on-chain data
    */
   async getEscrowBalance(
     campaignId: string,
     chainId?: number
   ): Promise<{ balance: string; currency: string }> {
-    const settlements = this.getSettlementsByCampaign(campaignId);
-    let balance = BigInt(0);
+    const targetChainId = chainId || this.config.defaultChainId;
 
-    for (const settlement of settlements) {
-      if (settlement.status === "settled") {
-        if (!chainId || settlement.destinationChainId === chainId) {
-          balance += BigInt(settlement.destinationAmount);
+    try {
+      const provider = this.getProvider(targetChainId);
+      const usdcAddress = this.getUsdcAddress(targetChainId);
+      const usdcContract = new Contract(usdcAddress, ERC20_ABI, provider);
+      const balance: bigint = await usdcContract.balanceOf(this.config.escrowContractAddress);
+
+      return {
+        balance: balance.toString(),
+        currency: this.config.defaultCurrency,
+      };
+    } catch {
+      // Fallback to summing settled amounts from local records
+      const settlements = this.getSettlementsByCampaign(campaignId);
+      let balance = BigInt(0);
+
+      for (const settlement of settlements) {
+        if (settlement.status === "settled") {
+          if (!chainId || settlement.destinationChainId === chainId) {
+            balance += BigInt(settlement.destinationAmount);
+          }
         }
       }
-    }
 
-    return {
-      balance: balance.toString(),
-      currency: this.config.defaultCurrency,
+      return {
+        balance: balance.toString(),
+        currency: this.config.defaultCurrency,
+      };
+    }
+  }
+
+  // ==========================================================================
+  // HELPERS
+  // ==========================================================================
+
+  /**
+   * Well-known USDC contract addresses by chain
+   */
+  private getUsdcAddress(chainId: number): string {
+    const addresses: Record<number, string> = {
+      1: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48", // Ethereum
+      137: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", // Polygon
+      42161: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", // Arbitrum
+      10: "0x0b2C639c533813f4Aa9D7837CAf62653d097Ff85", // Optimism
+      8453: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // Base
+      11155111: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238", // Sepolia testnet
     };
+
+    const address = addresses[chainId];
+    if (!address) {
+      throw new Error(`No USDC address configured for chain ${chainId}`);
+    }
+    return address;
   }
 }
 
@@ -477,4 +586,6 @@ export const DEFAULT_SETTLEMENT_CONFIG: SettlementConfig = {
   minSettlementAmount: "100000", // $0.10 minimum
   batchingEnabled: false,
   batchIntervalMs: 60 * 1000, // 1 minute
+  rpcUrls: {},
+  blockConfirmations: 2,
 };

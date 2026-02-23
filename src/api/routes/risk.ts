@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { FraudDetector, createFraudDetector } from "../../risk";
+import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
 
@@ -20,7 +21,7 @@ const fraudDetector = createFraudDetector();
  * Request verification
  * POST /v1/risk/verify
  */
-router.post("/verify", async (req: Request, res: Response) => {
+router.post("/verify", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { userAddress, type, level } = req.body;
 
@@ -62,7 +63,7 @@ router.post("/verify", async (req: Request, res: Response) => {
  * Complete verification
  * POST /v1/risk/verify/:verificationId/complete
  */
-router.post("/verify/:verificationId/complete", async (req: Request, res: Response) => {
+router.post("/verify/:verificationId/complete", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { success, verifiedData, rejectionReason, provider, expiresInDays } =
       req.body;
@@ -128,7 +129,7 @@ router.get("/badges/:address", async (req: Request, res: Response) => {
  * Award badge
  * POST /v1/risk/badges
  */
-router.post("/badges", async (req: Request, res: Response) => {
+router.post("/badges", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { userAddress, type } = req.body;
 
@@ -155,7 +156,7 @@ router.post("/badges", async (req: Request, res: Response) => {
  * Calculate trust score
  * POST /v1/risk/score/:address
  */
-router.post("/score/:address", async (req: Request, res: Response) => {
+router.post("/score/:address", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const stats = req.body;
 
@@ -200,7 +201,7 @@ router.get("/score/:address", async (req: Request, res: Response) => {
  * Assess risk
  * POST /v1/risk/assess
  */
-router.post("/assess", async (req: Request, res: Response) => {
+router.post("/assess", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { entityType, entityId, data } = req.body;
 
@@ -270,7 +271,7 @@ router.get("/alerts", async (req: Request, res: Response) => {
  * Acknowledge alert
  * POST /v1/risk/alerts/:alertId/acknowledge
  */
-router.post("/alerts/:alertId/acknowledge", async (req: Request, res: Response) => {
+router.post("/alerts/:alertId/acknowledge", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { acknowledgedBy } = req.body;
 
@@ -295,7 +296,7 @@ router.post("/alerts/:alertId/acknowledge", async (req: Request, res: Response) 
  * Resolve alert
  * POST /v1/risk/alerts/:alertId/resolve
  */
-router.post("/alerts/:alertId/resolve", async (req: Request, res: Response) => {
+router.post("/alerts/:alertId/resolve", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { resolvedBy, resolution, actionTaken } = req.body;
 
@@ -328,7 +329,7 @@ router.post("/alerts/:alertId/resolve", async (req: Request, res: Response) => {
  * Add to blocklist
  * POST /v1/risk/blocklist
  */
-router.post("/blocklist", async (req: Request, res: Response) => {
+router.post("/blocklist", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { type, value, reason, severity, addedBy } = req.body;
 
@@ -392,7 +393,7 @@ router.get("/blocklist/check", async (req: Request, res: Response) => {
  * Remove from blocklist
  * DELETE /v1/risk/blocklist
  */
-router.delete("/blocklist", async (req: Request, res: Response) => {
+router.delete("/blocklist", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { type, value } = req.body;
 
@@ -419,7 +420,7 @@ router.delete("/blocklist", async (req: Request, res: Response) => {
  * Generate risk report
  * POST /v1/risk/reports
  */
-router.post("/reports", async (req: Request, res: Response) => {
+router.post("/reports", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { periodStart, periodEnd } = req.body;
 

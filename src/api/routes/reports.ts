@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { reportService } from "../../reporting";
+import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
 
@@ -17,7 +18,7 @@ const router = Router();
  * POST /reports/generate
  * Generate a report
  */
-router.post("/generate", async (req: Request, res: Response) => {
+router.post("/generate", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { type, format, period, filters, options } = req.body;
     const requestedBy = req.body.requestedBy || "anonymous";
@@ -87,7 +88,7 @@ router.get("/:reportId/download", async (req: Request, res: Response) => {
  * DELETE /reports/:reportId
  * Cancel a pending report
  */
-router.delete("/:reportId", (req: Request, res: Response) => {
+router.delete("/:reportId", authMiddleware(), (req: Request, res: Response) => {
   const success = reportService.cancelReport(req.params.reportId);
 
   if (success) {
@@ -171,7 +172,7 @@ router.get("/tax/:address/:year", (req: Request, res: Response) => {
  * POST /reports/tax/:address/form
  * Generate tax form
  */
-router.post("/tax/:address/form", async (req: Request, res: Response) => {
+router.post("/tax/:address/form", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { formType, year } = req.body;
 
@@ -261,7 +262,7 @@ router.get("/disputes", (req: Request, res: Response) => {
  * POST /reports/exports
  * Request data export
  */
-router.post("/exports", async (req: Request, res: Response) => {
+router.post("/exports", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { dataType, format, filters, fields, requestedBy } = req.body;
 
@@ -303,7 +304,7 @@ router.get("/exports/:exportId", (req: Request, res: Response) => {
  * POST /reports/scheduled
  * Create scheduled report
  */
-router.post("/scheduled", (req: Request, res: Response) => {
+router.post("/scheduled", authMiddleware(), (req: Request, res: Response) => {
   try {
     const scheduled = reportService.createScheduledReport(req.body);
     res.status(201).json(scheduled);
@@ -328,7 +329,7 @@ router.get("/scheduled", (req: Request, res: Response) => {
  * PUT /reports/scheduled/:reportId
  * Update scheduled report
  */
-router.put("/scheduled/:reportId", (req: Request, res: Response) => {
+router.put("/scheduled/:reportId", authMiddleware(), (req: Request, res: Response) => {
   try {
     const updated = reportService.updateScheduledReport(
       req.params.reportId,
@@ -346,7 +347,7 @@ router.put("/scheduled/:reportId", (req: Request, res: Response) => {
  * DELETE /reports/scheduled/:reportId
  * Delete scheduled report
  */
-router.delete("/scheduled/:reportId", (req: Request, res: Response) => {
+router.delete("/scheduled/:reportId", authMiddleware(), (req: Request, res: Response) => {
   const success = reportService.deleteScheduledReport(req.params.reportId);
 
   if (success) {
@@ -360,7 +361,7 @@ router.delete("/scheduled/:reportId", (req: Request, res: Response) => {
  * POST /reports/scheduled/:reportId/run
  * Run scheduled report now
  */
-router.post("/scheduled/:reportId/run", async (req: Request, res: Response) => {
+router.post("/scheduled/:reportId/run", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const report = await reportService.runScheduledReport(req.params.reportId);
     res.json(report);

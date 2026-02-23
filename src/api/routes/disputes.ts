@@ -7,6 +7,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { disputeService } from "../../governance";
 import { DisputeCategory, DisputeStatus, VoteOption } from "../../governance/types";
+import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
 
@@ -109,7 +110,7 @@ const FilterQuerySchema = z.object({
  * POST /disputes
  * Create a new dispute
  */
-router.post("/", async (req: Request, res: Response) => {
+router.post("/", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const parsed = CreateDisputeSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -308,7 +309,7 @@ router.get("/:disputeId/timeline", (req: Request, res: Response) => {
  * POST /disputes/:disputeId/evidence
  * Submit evidence for a dispute
  */
-router.post("/:disputeId/evidence", async (req: Request, res: Response) => {
+router.post("/:disputeId/evidence", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const parsed = SubmitEvidenceSchema.safeParse(req.body);
@@ -371,7 +372,7 @@ router.get("/:disputeId/evidence", (req: Request, res: Response) => {
  * POST /disputes/:disputeId/voting/open
  * Open voting on a dispute
  */
-router.post("/:disputeId/voting/open", async (req: Request, res: Response) => {
+router.post("/:disputeId/voting/open", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const parsed = OpenVotingSchema.safeParse(req.body);
@@ -416,7 +417,7 @@ router.post("/:disputeId/voting/open", async (req: Request, res: Response) => {
  * POST /disputes/:disputeId/voting/vote
  * Cast a vote on a dispute
  */
-router.post("/:disputeId/voting/vote", async (req: Request, res: Response) => {
+router.post("/:disputeId/voting/vote", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const parsed = CastVoteSchema.safeParse(req.body);
@@ -483,7 +484,7 @@ router.get("/:disputeId/voting/votes", (req: Request, res: Response) => {
  * POST /disputes/:disputeId/voting/close
  * Close voting on a dispute
  */
-router.post("/:disputeId/voting/close", async (req: Request, res: Response) => {
+router.post("/:disputeId/voting/close", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const tally = await disputeService.closeVoting(disputeId);
@@ -511,7 +512,7 @@ router.post("/:disputeId/voting/close", async (req: Request, res: Response) => {
  * POST /disputes/:disputeId/resolve
  * Resolve a dispute (admin/council)
  */
-router.post("/:disputeId/resolve", async (req: Request, res: Response) => {
+router.post("/:disputeId/resolve", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const parsed = ResolveDisputeSchema.safeParse(req.body);
@@ -565,7 +566,7 @@ router.post("/:disputeId/resolve", async (req: Request, res: Response) => {
  * POST /disputes/:disputeId/appeal
  * Appeal a dispute resolution
  */
-router.post("/:disputeId/appeal", async (req: Request, res: Response) => {
+router.post("/:disputeId/appeal", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const parsed = AppealSchema.safeParse(req.body);
@@ -603,7 +604,7 @@ router.post("/:disputeId/appeal", async (req: Request, res: Response) => {
  * POST /disputes/:disputeId/escalate
  * Manually escalate a dispute
  */
-router.post("/:disputeId/escalate", async (req: Request, res: Response) => {
+router.post("/:disputeId/escalate", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const { reason } = req.body;
@@ -641,7 +642,7 @@ router.post("/:disputeId/escalate", async (req: Request, res: Response) => {
  * POST /disputes/:disputeId/close
  * Close a dispute
  */
-router.post("/:disputeId/close", async (req: Request, res: Response) => {
+router.post("/:disputeId/close", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const closedBy = req.headers["x-wallet-address"] as string || req.body.closedBy || "system";
@@ -664,7 +665,7 @@ router.post("/:disputeId/close", async (req: Request, res: Response) => {
  * POST /disputes/process-timeouts
  * Process timeout escalations (called by scheduler)
  */
-router.post("/process-timeouts", async (_req: Request, res: Response) => {
+router.post("/process-timeouts", authMiddleware(), async (_req: Request, res: Response) => {
   try {
     const escalatedIds = await disputeService.processTimeouts();
 

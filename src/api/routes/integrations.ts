@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { integrationService } from "../../integrations";
+import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
 
@@ -17,7 +18,7 @@ const router = Router();
  * POST /integrations
  * Create a new integration
  */
-router.post("/", (req: Request, res: Response) => {
+router.post("/", authMiddleware(), (req: Request, res: Response) => {
   try {
     const integration = integrationService.createIntegration(req.body);
     res.status(201).json(integration);
@@ -65,7 +66,7 @@ router.get("/:integrationId", (req: Request, res: Response) => {
  * PUT /integrations/:integrationId
  * Update integration
  */
-router.put("/:integrationId", (req: Request, res: Response) => {
+router.put("/:integrationId", authMiddleware(), (req: Request, res: Response) => {
   try {
     const updated = integrationService.updateIntegration(
       req.params.integrationId,
@@ -83,7 +84,7 @@ router.put("/:integrationId", (req: Request, res: Response) => {
  * DELETE /integrations/:integrationId
  * Delete integration
  */
-router.delete("/:integrationId", (req: Request, res: Response) => {
+router.delete("/:integrationId", authMiddleware(), (req: Request, res: Response) => {
   const success = integrationService.deleteIntegration(req.params.integrationId);
 
   if (success) {
@@ -97,7 +98,7 @@ router.delete("/:integrationId", (req: Request, res: Response) => {
  * POST /integrations/:integrationId/test
  * Test integration
  */
-router.post("/:integrationId/test", async (req: Request, res: Response) => {
+router.post("/:integrationId/test", authMiddleware(), async (req: Request, res: Response) => {
   const result = await integrationService.testIntegration(req.params.integrationId);
   res.json(result);
 });
@@ -166,7 +167,7 @@ router.get("/oauth/callback", async (req: Request, res: Response) => {
  * POST /integrations/:integrationId/send
  * Send a message via integration
  */
-router.post("/:integrationId/send", async (req: Request, res: Response) => {
+router.post("/:integrationId/send", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { eventType, data } = req.body;
 
@@ -188,7 +189,7 @@ router.post("/:integrationId/send", async (req: Request, res: Response) => {
  * POST /integrations/broadcast
  * Broadcast event to all integrations
  */
-router.post("/broadcast", async (req: Request, res: Response) => {
+router.post("/broadcast", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { address, eventType, data } = req.body;
 
