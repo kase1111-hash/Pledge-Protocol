@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { GdprService, createGdprService } from "../../compliance";
+import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
 
@@ -20,7 +21,7 @@ const gdprService = createGdprService();
  * Request data export
  * POST /v1/compliance/export
  */
-router.post("/export", async (req: Request, res: Response) => {
+router.post("/export", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { userAddress, format, categories } = req.body;
 
@@ -89,7 +90,7 @@ router.get("/export/user/:address", async (req: Request, res: Response) => {
  * Request data deletion
  * POST /v1/compliance/delete
  */
-router.post("/delete", async (req: Request, res: Response) => {
+router.post("/delete", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { userAddress, type, categories, reason } = req.body;
 
@@ -123,7 +124,7 @@ router.post("/delete", async (req: Request, res: Response) => {
  * Confirm data deletion
  * POST /v1/compliance/delete/:requestId/confirm
  */
-router.post("/delete/:requestId/confirm", async (req: Request, res: Response) => {
+router.post("/delete/:requestId/confirm", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { confirmationToken } = req.body;
 
@@ -152,7 +153,7 @@ router.post("/delete/:requestId/confirm", async (req: Request, res: Response) =>
  * Cancel deletion request
  * POST /v1/compliance/delete/:requestId/cancel
  */
-router.post("/delete/:requestId/cancel", async (req: Request, res: Response) => {
+router.post("/delete/:requestId/cancel", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const request = await gdprService.cancelDeletion(req.params.requestId);
     res.json({
@@ -210,7 +211,7 @@ router.get("/consent/:address", async (req: Request, res: Response) => {
  * Update consent preferences
  * PUT /v1/compliance/consent/:address
  */
-router.put("/consent/:address", async (req: Request, res: Response) => {
+router.put("/consent/:address", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { consents } = req.body;
 
@@ -256,7 +257,7 @@ router.get("/consent/:address/history", async (req: Request, res: Response) => {
  * Submit GDPR rights request
  * POST /v1/compliance/gdpr
  */
-router.post("/gdpr", async (req: Request, res: Response) => {
+router.post("/gdpr", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { userAddress, right } = req.body;
 
@@ -323,7 +324,7 @@ router.get("/gdpr/:requestId", async (req: Request, res: Response) => {
  * Submit CCPA rights request
  * POST /v1/compliance/ccpa
  */
-router.post("/ccpa", async (req: Request, res: Response) => {
+router.post("/ccpa", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { userAddress, right, verificationMethod } = req.body;
 
@@ -400,7 +401,7 @@ router.get("/retention", async (req: Request, res: Response) => {
  * Generate compliance report
  * POST /v1/compliance/reports
  */
-router.post("/reports", async (req: Request, res: Response) => {
+router.post("/reports", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { type, periodStart, periodEnd } = req.body;
 

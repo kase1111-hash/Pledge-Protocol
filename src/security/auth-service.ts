@@ -3,7 +3,8 @@
  * Phase 7: Production Infrastructure - Wallet signature verification and session management
  */
 
-import { createHash, randomBytes } from "crypto";
+import { randomBytes } from "crypto";
+import { verifyMessage } from "ethers";
 import {
   AuthContext,
   AuthRequest,
@@ -15,11 +16,6 @@ import {
   ROLE_PERMISSIONS,
   SecurityEvent,
 } from "./types";
-
-/**
- * EIP-191 message prefix
- */
-const EIP191_PREFIX = "\x19Ethereum Signed Message:\n";
 
 /**
  * Authentication Service
@@ -187,53 +183,14 @@ export class AuthService {
   }
 
   /**
-   * Recover address from signed message (EIP-191)
-   * In production, use ethers.js or web3.js for proper recovery
+   * Recover address from signed message using EIP-191 ECDSA recovery
    */
   private recoverAddress(message: string, signature: string): string {
-    // This is a simplified version for testing
-    // In production, use proper ECDSA recovery:
-    // const { verifyMessage } = require('ethers');
-    // return verifyMessage(message, signature);
-
-    // For now, we'll simulate by checking signature format
     if (!signature.startsWith("0x") || signature.length !== 132) {
       throw new Error("Invalid signature format");
     }
 
-    // Extract components (r, s, v)
-    const r = signature.slice(0, 66);
-    const s = "0x" + signature.slice(66, 130);
-    const v = parseInt(signature.slice(130, 132), 16);
-
-    if (v !== 27 && v !== 28) {
-      throw new Error("Invalid signature v value");
-    }
-
-    // In production, this would do actual ECDSA recovery
-    // For testing, we'll hash the message to simulate address derivation
-    const messageHash = this.hashMessage(message);
-
-    // Simulate address recovery from hash + signature
-    // This is NOT cryptographically secure - just for testing
-    const combinedHash = createHash("sha256")
-      .update(messageHash)
-      .update(Buffer.from(signature.slice(2), "hex"))
-      .digest();
-
-    // Return a deterministic address based on the hash
-    // In production, this would be actual ECDSA recovery
-    return "0x" + combinedHash.slice(0, 20).toString("hex");
-  }
-
-  /**
-   * Hash message with EIP-191 prefix
-   */
-  private hashMessage(message: string): string {
-    const messageBytes = Buffer.from(message);
-    const prefix = Buffer.from(`${EIP191_PREFIX}${messageBytes.length}`);
-    const fullMessage = Buffer.concat([prefix, messageBytes]);
-    return createHash("sha256").update(fullMessage).digest("hex");
+    return verifyMessage(message, signature);
   }
 
   /**

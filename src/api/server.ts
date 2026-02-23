@@ -1,5 +1,10 @@
 import express, { Express, Request, Response, NextFunction } from "express";
 import dotenv from "dotenv";
+dotenv.config();
+
+// Validate environment variables early — fails fast if misconfigured
+import { env } from "../config/env";
+
 import campaignRoutes from "./routes/campaigns";
 import pledgeRoutes from "./routes/pledges";
 import oracleRoutes, { initializeOracleServices } from "./routes/oracles";
@@ -39,10 +44,8 @@ import {
 import { jobQueue } from "../infrastructure/job-queue";
 import { logger } from "../security/audit-logger";
 
-dotenv.config();
-
 const app: Express = express();
-const PORT = process.env.PORT || 3000;
+const PORT = env.PORT;
 
 // Initialize oracle services
 initializeOracleServices(webhookHandler, resolutionEngine);
