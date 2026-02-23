@@ -13,8 +13,9 @@ const envSchema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
 
   // Database — require explicit opt-in to in-memory mode
+  // Accepts "postgres" or "postgresql" (both mean PostgreSQL)
   DATABASE_TYPE: z
-    .enum(["postgres", "memory"])
+    .enum(["postgresql", "postgres", "memory"])
     .default("memory"),
   DATABASE_URL: z.string().url().optional(),
 
@@ -24,6 +25,15 @@ const envSchema = z.object({
   // Blockchain (optional — only needed for on-chain operations)
   SEPOLIA_RPC_URL: z.string().url().optional(),
   PRIVATE_KEY: z.string().optional(),
+
+  // Stripe (optional — only needed for fiat payments)
+  STRIPE_SECRET_KEY: z.string().optional(),
+  STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  STRIPE_PUBLISHABLE_KEY: z.string().optional(),
+
+  // Circle (optional — only needed for USDC payments)
+  CIRCLE_API_KEY: z.string().optional(),
+  CIRCLE_API_URL: z.string().url().optional(),
 
   // IPFS (optional — only needed for token storage)
   IPFS_API_URL: z.string().url().optional(),
@@ -48,7 +58,7 @@ function validateEnv(): Env {
   const env = result.data;
 
   // Cross-field validation
-  if (env.DATABASE_TYPE === "postgres" && !env.DATABASE_URL) {
+  if ((env.DATABASE_TYPE === "postgres" || env.DATABASE_TYPE === "postgresql") && !env.DATABASE_URL) {
     throw new Error(
       "DATABASE_URL is required when DATABASE_TYPE=postgres. " +
         "Set DATABASE_TYPE=memory to use in-memory storage."

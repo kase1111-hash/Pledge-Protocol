@@ -5,6 +5,7 @@
  * Supports Apple Pay, Google Pay, 3D Secure.
  */
 
+import Stripe from "stripe";
 import { randomUUID } from "crypto";
 import {
   PaymentProviderInterface,
@@ -34,14 +35,15 @@ export class StripeProvider implements PaymentProviderInterface {
   name: PaymentProvider = "stripe";
 
   private config: StripeConfig;
-  private sessions: Map<string, CheckoutSession> = new Map();
-  private intents: Map<string, PaymentIntent> = new Map();
-  private refunds: Map<string, Refund> = new Map();
-  private subscriptions: Map<string, Subscription> = new Map();
-  private paymentMethods: Map<string, SavedPaymentMethod[]> = new Map();
+  private stripe: Stripe;
+
+  // Local index for mapping our session IDs to Stripe session IDs
+  private sessionIndex: Map<string, { stripeSessionId: string; session: CheckoutSession }> =
+    new Map();
 
   constructor(config: StripeConfig) {
     this.config = config;
+    this.stripe = new Stripe(config.secretKey);
   }
 
   // ==========================================================================
@@ -51,10 +53,9 @@ export class StripeProvider implements PaymentProviderInterface {
   async createCheckout(request: CreateCheckoutRequest): Promise<CheckoutResult> {
     const sessionId = `cs_${randomUUID().replace(/-/g, "")}`;
     const now = Date.now();
-    const expiresAt = now + 30 * 60 * 1000; // 30 minutes
+    const amountCents = parseInt(request.amount);
 
     // Calculate fees (Stripe: 2.9% + $0.30)
-    const amountCents = parseInt(request.amount);
     const processingFee = Math.round(amountCents * 0.029 + 30);
     const platformFee = Math.round(amountCents * 0.025); // 2.5% platform fee
     const totalFees = processingFee + platformFee;
@@ -67,9 +68,39 @@ export class StripeProvider implements PaymentProviderInterface {
       netAmount: netAmount.toString(),
     };
 
-    // In production, this would call Stripe API
-    // const stripeSession = await stripe.checkout.sessions.create({...})
-    const providerSessionId = `stripe_cs_${randomUUID().slice(0, 8)}`;
+    // Create a real Stripe Checkout Session
+    const stripeSession = await this.stripe.checkout.sessions.create({
+      mode: "payment",
+      payment_method_types: this.getPaymentMethodTypes(request.method),
+      line_items: [
+        {
+          price_data: {
+            currency: request.currency.toLowerCase(),
+            product_data: {
+              name: `Pledge to campaign ${request.campaignId}`,
+              metadata: {
+                campaignId: request.campaignId,
+                backerAddress: request.backerAddress,
+                internalSessionId: sessionId,
+              },
+            },
+            unit_amount: amountCents,
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        campaignId: request.campaignId,
+        backerAddress: request.backerAddress,
+        internalSessionId: sessionId,
+        ...request.metadata,
+      },
+      success_url: request.returnUrl,
+      cancel_url: request.cancelUrl || request.returnUrl,
+      expires_at: Math.floor(Date.now() / 1000) + 30 * 60, // 30 minutes
+    });
+
+    const expiresAt = now + 30 * 60 * 1000;
 
     const session: CheckoutSession = {
       id: sessionId,
@@ -82,44 +113,51 @@ export class StripeProvider implements PaymentProviderInterface {
       amountDecimal: (amountCents / 100).toFixed(2),
       fees,
       status: "pending",
-      providerSessionId,
-      checkoutUrl: `https://checkout.stripe.com/pay/${providerSessionId}`,
+      providerSessionId: stripeSession.id,
+      checkoutUrl: stripeSession.url || undefined,
       metadata: request.metadata || {},
       createdAt: now,
       updatedAt: now,
       expiresAt,
     };
 
-    this.sessions.set(sessionId, session);
+    this.sessionIndex.set(sessionId, {
+      stripeSessionId: stripeSession.id,
+      session,
+    });
 
     return {
       session,
-      checkoutUrl: session.checkoutUrl!,
+      checkoutUrl: stripeSession.url!,
       expiresAt,
     };
   }
 
   async getCheckout(sessionId: string): Promise<CheckoutSession> {
-    const session = this.sessions.get(sessionId);
-    if (!session) {
+    const entry = this.sessionIndex.get(sessionId);
+    if (!entry) {
       throw this.createError("processing_error", "Checkout session not found");
     }
 
-    // Check expiration
-    if (session.expiresAt < Date.now() && session.status === "pending") {
-      session.status = "cancelled";
-      session.updatedAt = Date.now();
+    // Fetch latest status from Stripe
+    const stripeSession = await this.stripe.checkout.sessions.retrieve(entry.stripeSessionId);
+    entry.session.status = this.mapStripeSessionStatus(stripeSession.status);
+    entry.session.updatedAt = Date.now();
+
+    if (stripeSession.payment_intent && typeof stripeSession.payment_intent === "string") {
+      entry.session.providerPaymentIntentId = stripeSession.payment_intent;
     }
 
-    return session;
+    return entry.session;
   }
 
   async expireCheckout(sessionId: string): Promise<void> {
-    const session = this.sessions.get(sessionId);
-    if (session && session.status === "pending") {
-      session.status = "cancelled";
-      session.updatedAt = Date.now();
-    }
+    const entry = this.sessionIndex.get(sessionId);
+    if (!entry) return;
+
+    await this.stripe.checkout.sessions.expire(entry.stripeSessionId);
+    entry.session.status = "cancelled";
+    entry.session.updatedAt = Date.now();
   }
 
   // ==========================================================================
@@ -127,63 +165,18 @@ export class StripeProvider implements PaymentProviderInterface {
   // ==========================================================================
 
   async confirmPayment(paymentIntentId: string): Promise<PaymentIntent> {
-    // Find associated session
-    let targetSession: CheckoutSession | undefined;
-    for (const session of this.sessions.values()) {
-      if (session.providerPaymentIntentId === paymentIntentId) {
-        targetSession = session;
-        break;
-      }
-    }
-
-    const intent = this.intents.get(paymentIntentId);
-    if (!intent) {
-      // Create new intent if confirming from session
-      const newIntent: PaymentIntent = {
-        id: `pi_${randomUUID().replace(/-/g, "")}`,
-        sessionId: targetSession?.id || "",
-        provider: "stripe",
-        providerIntentId: paymentIntentId,
-        amount: targetSession?.amount || "0",
-        currency: targetSession?.currency || "USD",
-        status: "succeeded",
-        cardBrand: "visa",
-        cardLast4: "4242",
-        cardExpMonth: 12,
-        cardExpYear: 2028,
-        requiresAction: false,
-        createdAt: Date.now(),
-        confirmedAt: Date.now(),
-      };
-
-      this.intents.set(paymentIntentId, newIntent);
-
-      // Update session status
-      if (targetSession) {
-        targetSession.status = "succeeded";
-        targetSession.providerPaymentIntentId = paymentIntentId;
-        targetSession.updatedAt = Date.now();
-      }
-
-      return newIntent;
-    }
-
-    intent.status = "succeeded";
-    intent.confirmedAt = Date.now();
-    return intent;
+    const stripeIntent = await this.stripe.paymentIntents.confirm(paymentIntentId);
+    return this.mapStripePaymentIntent(stripeIntent);
   }
 
   async cancelPayment(paymentIntentId: string): Promise<void> {
-    const intent = this.intents.get(paymentIntentId);
-    if (intent) {
-      intent.status = "cancelled";
-    }
+    await this.stripe.paymentIntents.cancel(paymentIntentId);
 
-    // Cancel associated session
-    for (const session of this.sessions.values()) {
-      if (session.providerPaymentIntentId === paymentIntentId) {
-        session.status = "cancelled";
-        session.updatedAt = Date.now();
+    // Update any associated session
+    for (const entry of this.sessionIndex.values()) {
+      if (entry.session.providerPaymentIntentId === paymentIntentId) {
+        entry.session.status = "cancelled";
+        entry.session.updatedAt = Date.now();
         break;
       }
     }
@@ -194,58 +187,63 @@ export class StripeProvider implements PaymentProviderInterface {
   // ==========================================================================
 
   async createRefund(request: RefundRequest): Promise<Refund> {
-    const session = request.sessionId
-      ? this.sessions.get(request.sessionId)
-      : undefined;
+    let paymentIntentId: string | undefined;
+    let session: CheckoutSession | undefined;
 
-    if (request.sessionId && !session) {
-      throw this.createError("processing_error", "Session not found for refund");
+    if (request.sessionId) {
+      const entry = this.sessionIndex.get(request.sessionId);
+      if (!entry) {
+        throw this.createError("processing_error", "Session not found for refund");
+      }
+      session = entry.session;
+      paymentIntentId = session.providerPaymentIntentId;
     }
 
-    const refundId = `re_${randomUUID().replace(/-/g, "")}`;
-    const now = Date.now();
+    if (!paymentIntentId) {
+      throw this.createError("processing_error", "No payment intent to refund");
+    }
 
-    // In production: await stripe.refunds.create({...})
+    const refundParams: Stripe.RefundCreateParams = {
+      payment_intent: paymentIntentId,
+      reason: this.mapRefundReason(request.reason),
+    };
+
+    if (request.amount) {
+      refundParams.amount = parseInt(request.amount);
+    }
+
+    const stripeRefund = await this.stripe.refunds.create(refundParams);
 
     const refund: Refund = {
-      id: refundId,
+      id: `re_${randomUUID().replace(/-/g, "")}`,
       sessionId: request.sessionId || "",
-      paymentIntentId: session?.providerPaymentIntentId || "",
+      paymentIntentId: paymentIntentId,
       pledgeId: request.pledgeId || "",
-      amount: request.amount || session?.amount || "0",
-      currency: session?.currency || "USD",
+      amount: (stripeRefund.amount ?? 0).toString(),
+      currency: (stripeRefund.currency ?? "usd").toUpperCase() as any,
       reason: request.reason,
       description: request.description,
-      status: "processing",
-      providerRefundId: `stripe_re_${randomUUID().slice(0, 8)}`,
+      status: stripeRefund.status === "succeeded" ? "succeeded" : "processing",
+      providerRefundId: stripeRefund.id,
       escrowRefund: false,
-      createdAt: now,
+      createdAt: Date.now(),
       requestedBy: session?.backerAddress || "",
     };
 
-    // Simulate async processing
-    setTimeout(() => {
-      refund.status = "succeeded";
-      refund.processedAt = Date.now();
+    if (session) {
+      const isFullRefund = !request.amount || request.amount === session.amount;
+      session.status = isFullRefund ? "refunded" : "partially_refunded";
+      session.updatedAt = Date.now();
+    }
 
-      if (session) {
-        session.status = request.amount === session.amount
-          ? "refunded"
-          : "partially_refunded";
-        session.updatedAt = Date.now();
-      }
-    }, 100);
-
-    this.refunds.set(refundId, refund);
     return refund;
   }
 
   async getRefund(refundId: string): Promise<Refund> {
-    const refund = this.refunds.get(refundId);
-    if (!refund) {
-      throw this.createError("processing_error", "Refund not found");
-    }
-    return refund;
+    throw this.createError(
+      "processing_error",
+      "Use webhook events to track refund status"
+    );
   }
 
   // ==========================================================================
@@ -255,73 +253,90 @@ export class StripeProvider implements PaymentProviderInterface {
   async createSubscription(
     request: CreateSubscriptionRequest
   ): Promise<Subscription> {
-    const subscriptionId = `sub_${randomUUID().replace(/-/g, "")}`;
-    const now = Date.now();
+    // Create or retrieve Stripe customer
+    const customer = await this.stripe.customers.create({
+      metadata: {
+        backerAddress: request.backerAddress,
+        campaignId: request.campaignId,
+      },
+    });
 
-    // Calculate period based on interval
-    const intervalMs = {
-      weekly: 7 * 24 * 60 * 60 * 1000,
-      monthly: 30 * 24 * 60 * 60 * 1000,
-      quarterly: 90 * 24 * 60 * 60 * 1000,
-      yearly: 365 * 24 * 60 * 60 * 1000,
-    };
+    // Create a price for this subscription
+    const price = await this.stripe.prices.create({
+      currency: request.currency.toLowerCase(),
+      unit_amount: parseInt(request.amount),
+      recurring: {
+        interval: this.mapSubscriptionInterval(request.interval),
+        interval_count: request.interval === "quarterly" ? 3 : 1,
+      },
+      product_data: {
+        name: `Recurring pledge to campaign ${request.campaignId}`,
+        metadata: {
+          campaignId: request.campaignId,
+          backerAddress: request.backerAddress,
+        },
+      },
+    });
+
+    const stripeSubscription = await this.stripe.subscriptions.create({
+      customer: customer.id,
+      items: [{ price: price.id }],
+      metadata: {
+        campaignId: request.campaignId,
+        backerAddress: request.backerAddress,
+        ...request.metadata,
+      },
+    });
+
+    const now = Date.now();
+    // Access subscription item period data (Stripe API v2023+)
+    const firstItem = stripeSubscription.items?.data?.[0];
+    const periodStart = firstItem?.current_period_start ?? Math.floor(now / 1000);
+    const periodEnd = firstItem?.current_period_end ?? Math.floor(now / 1000) + 30 * 86400;
 
     const subscription: Subscription = {
-      id: subscriptionId,
+      id: `sub_${randomUUID().replace(/-/g, "")}`,
       campaignId: request.campaignId,
       backerAddress: request.backerAddress,
       amount: request.amount,
       currency: request.currency,
       interval: request.interval,
       provider: "stripe",
-      providerSubscriptionId: `stripe_sub_${randomUUID().slice(0, 8)}`,
+      providerSubscriptionId: stripeSubscription.id,
       status: "active",
-      currentPeriodStart: now,
-      currentPeriodEnd: now + intervalMs[request.interval],
-      cancelAtPeriodEnd: false,
-      totalPaid: request.amount, // First payment
+      currentPeriodStart: periodStart * 1000,
+      currentPeriodEnd: periodEnd * 1000,
+      cancelAtPeriodEnd: stripeSubscription.cancel_at_period_end,
+      totalPaid: request.amount,
       paymentsCount: 1,
       lastPaymentAt: now,
-      nextPaymentAt: now + intervalMs[request.interval],
+      nextPaymentAt: periodEnd * 1000,
       metadata: request.metadata || {},
       createdAt: now,
     };
 
-    this.subscriptions.set(subscriptionId, subscription);
     return subscription;
   }
 
   async cancelSubscription(subscriptionId: string): Promise<Subscription> {
-    const subscription = this.subscriptions.get(subscriptionId);
-    if (!subscription) {
-      throw this.createError("processing_error", "Subscription not found");
-    }
-
-    subscription.status = "cancelled";
-    subscription.cancelledAt = Date.now();
-    return subscription;
+    throw this.createError(
+      "processing_error",
+      "Cancel via provider subscription ID using webhook handler"
+    );
   }
 
   async pauseSubscription(subscriptionId: string): Promise<Subscription> {
-    const subscription = this.subscriptions.get(subscriptionId);
-    if (!subscription) {
-      throw this.createError("processing_error", "Subscription not found");
-    }
-
-    subscription.status = "paused";
-    return subscription;
+    throw this.createError(
+      "processing_error",
+      "Pause via provider subscription ID using webhook handler"
+    );
   }
 
   async resumeSubscription(subscriptionId: string): Promise<Subscription> {
-    const subscription = this.subscriptions.get(subscriptionId);
-    if (!subscription) {
-      throw this.createError("processing_error", "Subscription not found");
-    }
-
-    if (subscription.status === "paused") {
-      subscription.status = "active";
-    }
-    return subscription;
+    throw this.createError(
+      "processing_error",
+      "Resume via provider subscription ID using webhook handler"
+    );
   }
 
   // ==========================================================================
@@ -332,44 +347,32 @@ export class StripeProvider implements PaymentProviderInterface {
     userAddress: string,
     providerMethodId: string
   ): Promise<SavedPaymentMethod> {
-    const methodId = `pm_${randomUUID().replace(/-/g, "")}`;
+    const stripeMethod = await this.stripe.paymentMethods.retrieve(providerMethodId);
 
     const method: SavedPaymentMethod = {
-      id: methodId,
+      id: `pm_${randomUUID().replace(/-/g, "")}`,
       userAddress,
       provider: "stripe",
       providerMethodId,
-      type: "card",
-      cardBrand: "visa",
-      cardLast4: "4242",
-      cardExpMonth: 12,
-      cardExpYear: 2028,
+      type: stripeMethod.type === "card" ? "card" : "bank_account",
+      cardBrand: stripeMethod.card?.brand,
+      cardLast4: stripeMethod.card?.last4,
+      cardExpMonth: stripeMethod.card?.exp_month,
+      cardExpYear: stripeMethod.card?.exp_year,
       isDefault: false,
       createdAt: Date.now(),
     };
-
-    const existing = this.paymentMethods.get(userAddress) || [];
-    if (existing.length === 0) {
-      method.isDefault = true;
-    }
-    existing.push(method);
-    this.paymentMethods.set(userAddress, existing);
 
     return method;
   }
 
   async deletePaymentMethod(methodId: string): Promise<void> {
-    for (const [address, methods] of this.paymentMethods.entries()) {
-      const filtered = methods.filter((m) => m.id !== methodId);
-      if (filtered.length !== methods.length) {
-        this.paymentMethods.set(address, filtered);
-        return;
-      }
-    }
+    await this.stripe.paymentMethods.detach(methodId);
   }
 
   async listPaymentMethods(userAddress: string): Promise<SavedPaymentMethod[]> {
-    return this.paymentMethods.get(userAddress) || [];
+    // Requires a Stripe customer ID — look up by userAddress in production
+    return [];
   }
 
   // ==========================================================================
@@ -377,19 +380,18 @@ export class StripeProvider implements PaymentProviderInterface {
   // ==========================================================================
 
   verifyWebhook(payload: string, signature: string): boolean {
-    // In production: stripe.webhooks.constructEvent(payload, signature, secret)
-    // Simplified verification for demo
-    if (!signature || !signature.startsWith("whsec_")) {
+    try {
+      this.stripe.webhooks.constructEvent(payload, signature, this.config.webhookSecret);
+      return true;
+    } catch {
       return false;
     }
-    return true;
   }
 
   parseWebhook(payload: string): PaymentWebhook {
     const data = JSON.parse(payload);
     const now = Date.now();
 
-    // Map Stripe events to our event types
     const eventMap: Record<string, PaymentWebhook["event"]> = {
       "checkout.session.completed": "checkout.completed",
       "checkout.session.expired": "checkout.expired",
@@ -413,7 +415,7 @@ export class StripeProvider implements PaymentProviderInterface {
       provider: "stripe",
       providerEventId: data.id || `evt_${randomUUID().slice(0, 8)}`,
       data: {
-        sessionId: data.data?.object?.id,
+        sessionId: data.data?.object?.metadata?.internalSessionId,
         paymentIntentId: data.data?.object?.payment_intent,
       },
       raw: data,
@@ -425,72 +427,96 @@ export class StripeProvider implements PaymentProviderInterface {
   // HELPERS
   // ==========================================================================
 
+  private getPaymentMethodTypes(
+    method?: string
+  ): Stripe.Checkout.SessionCreateParams.PaymentMethodType[] {
+    switch (method) {
+      case "apple_pay":
+      case "google_pay":
+      case "card":
+        return ["card"];
+      default:
+        return ["card"];
+    }
+  }
+
+  private mapStripeSessionStatus(
+    status: Stripe.Checkout.Session.Status | null
+  ): PaymentStatus {
+    switch (status) {
+      case "complete":
+        return "succeeded";
+      case "expired":
+        return "cancelled";
+      case "open":
+      default:
+        return "pending";
+    }
+  }
+
+  private mapStripePaymentIntent(intent: Stripe.PaymentIntent): PaymentIntent {
+    const statusMap: Record<string, PaymentStatus> = {
+      succeeded: "succeeded",
+      canceled: "cancelled",
+      processing: "processing",
+      requires_action: "requires_action",
+      requires_payment_method: "pending",
+      requires_confirmation: "pending",
+      requires_capture: "processing",
+    };
+
+    return {
+      id: intent.id,
+      sessionId: (intent.metadata?.internalSessionId) || "",
+      provider: "stripe",
+      providerIntentId: intent.id,
+      amount: intent.amount.toString(),
+      currency: intent.currency.toUpperCase() as any,
+      status: statusMap[intent.status] || "pending",
+      requiresAction: intent.status === "requires_action",
+      actionUrl: intent.next_action?.redirect_to_url?.url || undefined,
+      createdAt: intent.created * 1000,
+      confirmedAt: intent.status === "succeeded" ? Date.now() : undefined,
+    };
+  }
+
+  private mapRefundReason(
+    reason: string
+  ): Stripe.RefundCreateParams.Reason | undefined {
+    switch (reason) {
+      case "duplicate":
+        return "duplicate";
+      case "fraudulent":
+        return "fraudulent";
+      case "requested_by_customer":
+        return "requested_by_customer";
+      default:
+        return undefined;
+    }
+  }
+
+  private mapSubscriptionInterval(
+    interval: string
+  ): Stripe.PriceCreateParams.Recurring.Interval {
+    switch (interval) {
+      case "weekly":
+        return "week";
+      case "monthly":
+      case "quarterly":
+        return "month";
+      case "yearly":
+        return "year";
+      default:
+        return "month";
+    }
+  }
+
   private createError(code: PaymentErrorCode, message: string): PaymentError {
     return {
       code,
       message,
       provider: "stripe",
       retryable: ["processing_error", "rate_limited"].includes(code),
-    };
-  }
-
-  // Simulate payment completion (for testing)
-  async simulatePaymentSuccess(sessionId: string): Promise<CheckoutSession> {
-    const session = this.sessions.get(sessionId);
-    if (!session) {
-      throw this.createError("processing_error", "Session not found");
-    }
-
-    const paymentIntentId = `pi_${randomUUID().replace(/-/g, "")}`;
-    session.status = "succeeded";
-    session.providerPaymentIntentId = paymentIntentId;
-    session.updatedAt = Date.now();
-
-    // Create payment intent record
-    const intent: PaymentIntent = {
-      id: paymentIntentId,
-      sessionId,
-      provider: "stripe",
-      providerIntentId: paymentIntentId,
-      amount: session.amount,
-      currency: session.currency,
-      status: "succeeded",
-      cardBrand: "visa",
-      cardLast4: "4242",
-      requiresAction: false,
-      createdAt: Date.now(),
-      confirmedAt: Date.now(),
-    };
-    this.intents.set(paymentIntentId, intent);
-
-    return session;
-  }
-
-  // Get statistics
-  getStats(): {
-    sessions: number;
-    succeeded: number;
-    failed: number;
-    volume: string;
-  } {
-    let succeeded = 0;
-    let failed = 0;
-    let volume = BigInt(0);
-
-    for (const session of this.sessions.values()) {
-      if (session.status === "succeeded") {
-        succeeded++;
-        volume += BigInt(session.amount);
-      } else if (session.status === "failed") {
-        failed++;
-      }
-    }
-
-    return {
-      sessions: this.sessions.size,
-      succeeded,
-      failed,
-      volume: volume.toString(),
     };
   }
 }

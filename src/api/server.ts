@@ -42,7 +42,11 @@ import {
   notFoundMiddleware,
 } from "../security/middleware";
 import { jobQueue } from "../infrastructure/job-queue";
+import { oracleCache, campaignCache, sessionCache, generalCache } from "../infrastructure/cache";
+import { authService } from "../security/auth-service";
+import { ipRateLimiter, userRateLimiter, endpointRateLimiter } from "../security/rate-limiter";
 import { logger } from "../security/audit-logger";
+import { initializeDatabase, closeDatabase } from "../database/database-service";
 
 const app: Express = express();
 const PORT = env.PORT;
@@ -52,6 +56,23 @@ initializeOracleServices(webhookHandler, resolutionEngine);
 
 // Start background job queue
 jobQueue.start();
+
+// Schedule automatic resource cleanup
+const FIVE_MINUTES = 5 * 60 * 1000;
+const THIRTY_MINUTES = 30 * 60 * 1000;
+const SIX_HOURS = 6 * 60 * 60 * 1000;
+
+const cleanupIntervals = [
+  setInterval(() => oracleCache.cleanup(), FIVE_MINUTES),
+  setInterval(() => campaignCache.cleanup(), FIVE_MINUTES),
+  setInterval(() => sessionCache.cleanup(), FIVE_MINUTES),
+  setInterval(() => generalCache.cleanup(), FIVE_MINUTES),
+  setInterval(() => authService.cleanup(), FIVE_MINUTES),
+  setInterval(() => ipRateLimiter.cleanup(), THIRTY_MINUTES),
+  setInterval(() => userRateLimiter.cleanup(), THIRTY_MINUTES),
+  setInterval(() => endpointRateLimiter.cleanup(), THIRTY_MINUTES),
+  setInterval(() => jobQueue.cleanup(24 * 60 * 60 * 1000), SIX_HOURS),
+];
 
 // ============================================================================
 // PHASE 7: SECURITY MIDDLEWARE
@@ -154,38 +175,63 @@ app.use(notFoundMiddleware);
 // SERVER STARTUP
 // ============================================================================
 
-app.listen(PORT, () => {
-  logger.info(`Pledge Protocol API started`, {
-    port: PORT,
-    version: "10.0.0",
-    phase: 10,
-    environment: process.env.NODE_ENV || "development",
+// Initialize database then start server
+const dbType = (env.DATABASE_TYPE === "postgres" || env.DATABASE_TYPE === "postgresql")
+  ? "postgresql" as const
+  : "memory" as const;
+
+initializeDatabase({
+  type: dbType,
+  connectionString: env.DATABASE_URL,
+}).then(() => {
+  const server = app.listen(PORT, () => {
+    logger.info(`Pledge Protocol API started`, {
+      port: PORT,
+      version: "10.0.0",
+      phase: 10,
+      environment: process.env.NODE_ENV || "development",
+      database: dbType,
+    });
+    console.log(`Pledge Protocol API running on port ${PORT}`);
+    console.log(`Database: ${dbType}`);
+    console.log(`Health check: http://localhost:${PORT}/health`);
+    console.log(`Monitoring: http://localhost:${PORT}/v1/monitoring/health`);
   });
-  console.log(`Pledge Protocol API running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Monitoring: http://localhost:${PORT}/v1/monitoring/health`);
-  console.log(`Metrics: http://localhost:${PORT}/v1/monitoring/metrics`);
-  console.log(`Payments: http://localhost:${PORT}/v1/payments`);
-  console.log(`Compliance: http://localhost:${PORT}/v1/compliance`);
-  console.log(`Enterprise: http://localhost:${PORT}/v1/enterprise`);
-  console.log(`Risk: http://localhost:${PORT}/v1/risk`);
-  console.log(`Notifications: http://localhost:${PORT}/v1/notifications`);
-  console.log(`Reports: http://localhost:${PORT}/v1/reports`);
-  console.log(`Integrations: http://localhost:${PORT}/v1/integrations`);
-  console.log(`i18n: http://localhost:${PORT}/v1/i18n`);
-});
 
-// Graceful shutdown
-process.on("SIGTERM", () => {
-  logger.info("SIGTERM received, shutting down gracefully");
-  jobQueue.stop();
-  process.exit(0);
-});
+  // Graceful shutdown
+  function shutdown(signal: string) {
+    logger.info(`${signal} received, shutting down gracefully`);
 
-process.on("SIGINT", () => {
-  logger.info("SIGINT received, shutting down gracefully");
-  jobQueue.stop();
-  process.exit(0);
+    // Stop accepting new connections
+    server.close(() => {
+      logger.info("HTTP server closed");
+    });
+
+    // Clear all cleanup intervals
+    for (const interval of cleanupIntervals) {
+      clearInterval(interval);
+    }
+
+    // Stop background job queue
+    jobQueue.stop();
+
+    // Close database connections
+    closeDatabase().catch((err) => {
+      logger.error("Error closing database", err);
+    });
+
+    // Allow in-flight requests to drain (10s timeout)
+    setTimeout(() => {
+      logger.warn("Shutdown timeout reached, forcing exit");
+      process.exit(1);
+    }, 10_000).unref();
+  }
+
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
+  process.on("SIGINT", () => shutdown("SIGINT"));
+}).catch((err) => {
+  logger.error("Failed to initialize database", err);
+  process.exit(1);
 });
 
 export default app;

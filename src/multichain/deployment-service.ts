@@ -1,25 +1,31 @@
 /**
  * Multi-Chain Deployment Service
  * Phase 8: Ecosystem Expansion - Deploy and manage campaigns across chains
+ *
+ * Uses ethers.js ContractFactory for real on-chain deployment.
+ * Reads Hardhat artifacts for ABI and bytecode.
  */
 
-import { randomBytes } from "crypto";
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
+import {
+  JsonRpcProvider,
+  Wallet,
+  ContractFactory,
+} from "ethers";
 import {
   ChainId,
   ChainConfig,
   getChainConfig,
   isChainSupported,
   getEnabledChains,
-  DEFAULT_CHAIN_ID,
 } from "./config";
 import {
-  ContractDeployment,
   CampaignDeployment,
-  ContractType,
   multiChainRegistry,
 } from "./registry";
 import { logger, auditLogger } from "../security/audit-logger";
-import { jobQueue, JOB_TYPES } from "../infrastructure/job-queue";
+import { jobQueue } from "../infrastructure/job-queue";
 
 /**
  * Deployment request for a campaign
@@ -72,15 +78,101 @@ export interface GasEstimate {
 }
 
 /**
+ * Deployment configuration
+ */
+export interface DeploymentServiceConfig {
+  rpcUrls: Record<number, string>;
+  privateKey?: string;
+  artifactsPath?: string; // Path to Hardhat artifacts
+  blockConfirmations: number;
+}
+
+// ============================================================================
+// HARDHAT ARTIFACT LOADER
+// ============================================================================
+
+interface HardhatArtifact {
+  abi: any[];
+  bytecode: string;
+  contractName: string;
+}
+
+function loadArtifact(contractName: string, artifactsPath: string): HardhatArtifact {
+  const artifactPath = join(
+    artifactsPath,
+    "contracts",
+    `${contractName}.sol`,
+    `${contractName}.json`
+  );
+
+  if (!existsSync(artifactPath)) {
+    throw new Error(
+      `Artifact not found for ${contractName}. Run 'npx hardhat compile' first. ` +
+        `Expected at: ${artifactPath}`
+    );
+  }
+
+  const raw = readFileSync(artifactPath, "utf-8");
+  const artifact = JSON.parse(raw);
+
+  if (!artifact.abi || !artifact.bytecode) {
+    throw new Error(`Invalid artifact for ${contractName}: missing ABI or bytecode`);
+  }
+
+  return {
+    abi: artifact.abi,
+    bytecode: artifact.bytecode,
+    contractName,
+  };
+}
+
+// ============================================================================
+// DEPLOYMENT SERVICE
+// ============================================================================
+
+/**
  * Multi-Chain Deployment Service
  * Handles deployment of campaigns and contracts across multiple networks
  */
 export class DeploymentService {
   private pendingDeployments: Map<string, DeploymentRequest> = new Map();
   private deploymentResults: Map<string, DeploymentResult> = new Map();
+  private config: DeploymentServiceConfig;
+  private providers: Map<number, JsonRpcProvider> = new Map();
+
+  constructor(config?: DeploymentServiceConfig) {
+    this.config = config || {
+      rpcUrls: {},
+      blockConfirmations: 2,
+      artifactsPath: join(process.cwd(), "artifacts"),
+    };
+    this.initializeProviders();
+  }
+
+  private initializeProviders(): void {
+    for (const [chainIdStr, rpcUrl] of Object.entries(this.config.rpcUrls)) {
+      const chainId = parseInt(chainIdStr);
+      this.providers.set(chainId, new JsonRpcProvider(rpcUrl));
+    }
+  }
+
+  private getProvider(chainId: number): JsonRpcProvider {
+    const provider = this.providers.get(chainId);
+    if (!provider) {
+      throw new Error(`No RPC provider configured for chain ${chainId}`);
+    }
+    return provider;
+  }
+
+  private getWallet(chainId: number): Wallet {
+    if (!this.config.privateKey) {
+      throw new Error("Deployment private key not configured");
+    }
+    return new Wallet(this.config.privateKey, this.getProvider(chainId));
+  }
 
   /**
-   * Estimate gas for campaign deployment
+   * Estimate gas for campaign deployment using real RPC
    */
   async estimateDeploymentGas(
     chainId: ChainId,
@@ -91,45 +183,65 @@ export class DeploymentService {
       throw new Error(`Unsupported chain: ${chainId}`);
     }
 
-    // Base gas estimates (would be calculated from actual contract in production)
-    const baseGas = BigInt(500000); // Campaign creation
-    const milestoneGas = BigInt(50000) * BigInt(campaignData.milestones.length);
-    const gasLimit = baseGas + milestoneGas;
+    const provider = this.getProvider(chainId);
 
-    // Simulated gas prices (would query RPC in production)
-    const gasPrices: Record<ChainId, bigint> = {
-      1: BigInt(30000000000), // 30 gwei
-      11155111: BigInt(5000000000), // 5 gwei
-      137: BigInt(50000000000), // 50 gwei MATIC
-      80001: BigInt(5000000000),
-      42161: BigInt(100000000), // 0.1 gwei
-      421614: BigInt(100000000),
-      10: BigInt(1000000), // 0.001 gwei
-      11155420: BigInt(1000000),
-      8453: BigInt(1000000),
-      84532: BigInt(1000000),
-      5: BigInt(5000000000),
-      31337: BigInt(1000000000),
-    };
+    // Get real gas price from the network
+    const feeData = await provider.getFeeData();
+    const gasPrice = feeData.gasPrice || 0n;
 
-    const gasPrice = gasPrices[chainId] || BigInt(10000000000);
-    const estimatedCost = gasLimit * gasPrice;
+    // Estimate deployment gas using the artifact bytecode
+    const artifactsPath = this.config.artifactsPath || join(process.cwd(), "artifacts");
 
-    return {
-      chainId,
-      gasLimit,
-      gasPrice,
-      maxFeePerGas: config.features.supportsEIP1559 ? gasPrice * BigInt(2) : undefined,
-      maxPriorityFeePerGas: config.features.supportsEIP1559
-        ? BigInt(1000000000)
-        : undefined,
-      estimatedCost,
-      nativeCurrency: config.nativeCurrency.symbol,
-    };
+    try {
+      const artifact = loadArtifact("CampaignRegistry", artifactsPath);
+      const wallet = this.getWallet(chainId);
+      const factory = new ContractFactory(artifact.abi, artifact.bytecode, wallet);
+
+      // Use estimateGas on the deployment transaction
+      const deployTx = await factory.getDeployTransaction();
+      const gasLimit = await provider.estimateGas({
+        ...deployTx,
+        from: wallet.address,
+      });
+
+      const estimatedCost = gasLimit * gasPrice;
+
+      return {
+        chainId,
+        gasLimit,
+        gasPrice,
+        maxFeePerGas: config.features.supportsEIP1559
+          ? feeData.maxFeePerGas || undefined
+          : undefined,
+        maxPriorityFeePerGas: config.features.supportsEIP1559
+          ? feeData.maxPriorityFeePerGas || undefined
+          : undefined,
+        estimatedCost,
+        nativeCurrency: config.nativeCurrency.symbol,
+      };
+    } catch (error) {
+      // Fallback: estimate based on typical deployment size
+      const gasLimit = 500000n + 50000n * BigInt(campaignData.milestones.length);
+      const estimatedCost = gasLimit * gasPrice;
+
+      return {
+        chainId,
+        gasLimit,
+        gasPrice,
+        maxFeePerGas: config.features.supportsEIP1559
+          ? feeData.maxFeePerGas || undefined
+          : undefined,
+        maxPriorityFeePerGas: config.features.supportsEIP1559
+          ? feeData.maxPriorityFeePerGas || undefined
+          : undefined,
+        estimatedCost,
+        nativeCurrency: config.nativeCurrency.symbol,
+      };
+    }
   }
 
   /**
-   * Deploy campaign to a chain
+   * Deploy campaign to a chain using real ContractFactory
    */
   async deployCampaign(request: DeploymentRequest): Promise<DeploymentResult> {
     const { campaignId, chainId, creator, campaignData } = request;
@@ -158,9 +270,7 @@ export class DeploymentService {
 
     // Check if protocol contracts are deployed
     if (!multiChainRegistry.isDeployedOnChain(chainId)) {
-      // Queue contract deployment first
       logger.warn(`Protocol not deployed on chain ${chainId}, queuing deployment`);
-
       return {
         success: false,
         campaignId,
@@ -169,17 +279,15 @@ export class DeploymentService {
       };
     }
 
-    // Store pending deployment
-    const deploymentId = `deploy-${randomBytes(8).toString("hex")}`;
+    const deploymentId = `deploy-${Buffer.from(
+      new Uint8Array(8).map(() => Math.floor(Math.random() * 256))
+    ).toString("hex")}`;
     this.pendingDeployments.set(deploymentId, request);
 
     try {
-      // In production, this would interact with actual blockchain
-      // For now, simulate deployment
-      const result = await this.simulateDeployment(deploymentId, request);
+      const result = await this.executeDeployment(deploymentId, request);
 
       if (result.success) {
-        // Register deployment
         const deployment: CampaignDeployment = {
           campaignId,
           chainId,
@@ -229,6 +337,67 @@ export class DeploymentService {
   }
 
   /**
+   * Execute real on-chain contract deployment
+   */
+  private async executeDeployment(
+    deploymentId: string,
+    request: DeploymentRequest
+  ): Promise<DeploymentResult> {
+    const { campaignId, chainId, campaignData } = request;
+    const artifactsPath = this.config.artifactsPath || join(process.cwd(), "artifacts");
+    const wallet = this.getWallet(chainId);
+
+    // Load the CampaignRegistry artifact
+    const artifact = loadArtifact("CampaignRegistry", artifactsPath);
+    const factory = new ContractFactory(artifact.abi, artifact.bytecode, wallet);
+
+    // Deploy the contract
+    const contract = await factory.deploy();
+    const deployTx = contract.deploymentTransaction();
+
+    if (!deployTx) {
+      throw new Error("Deployment transaction not available");
+    }
+
+    // Wait for confirmations
+    const receipt = await deployTx.wait(this.config.blockConfirmations);
+
+    if (!receipt || receipt.status === 0) {
+      throw new Error("Contract deployment transaction reverted");
+    }
+
+    const contractAddress = await contract.getAddress();
+
+    // Deploy EscrowVault linked to the campaign
+    const escrowArtifact = loadArtifact("EscrowVault", artifactsPath);
+    const escrowFactory = new ContractFactory(
+      escrowArtifact.abi,
+      escrowArtifact.bytecode,
+      wallet
+    );
+    const escrowContract = await escrowFactory.deploy();
+    const escrowTx = escrowContract.deploymentTransaction();
+
+    if (escrowTx) {
+      await escrowTx.wait(this.config.blockConfirmations);
+    }
+
+    const escrowAddress = await escrowContract.getAddress();
+
+    return {
+      success: true,
+      campaignId,
+      chainId,
+      contractAddress,
+      escrowAddress,
+      transactionHash: deployTx.hash,
+      blockNumber: receipt.blockNumber,
+      gasUsed: receipt.gasUsed,
+      deploymentCost: receipt.gasUsed * (receipt.gasPrice || 0n),
+    };
+  }
+
+  /**
    * Deploy campaign to multiple chains
    */
   async deployToMultipleChains(
@@ -248,41 +417,12 @@ export class DeploymentService {
       });
       results.push(result);
 
-      // Continue even if one chain fails
       if (!result.success) {
         logger.warn(`Deployment to chain ${chainId} failed: ${result.error}`);
       }
     }
 
     return results;
-  }
-
-  /**
-   * Simulate deployment (for testing/development)
-   */
-  private async simulateDeployment(
-    deploymentId: string,
-    request: DeploymentRequest
-  ): Promise<DeploymentResult> {
-    // Simulate network delay
-    await new Promise((resolve) => setTimeout(resolve, 100));
-
-    // Generate deterministic addresses based on deployment
-    const contractAddress = `0x${randomBytes(20).toString("hex")}`;
-    const escrowAddress = `0x${randomBytes(20).toString("hex")}`;
-    const transactionHash = `0x${randomBytes(32).toString("hex")}`;
-
-    return {
-      success: true,
-      campaignId: request.campaignId,
-      chainId: request.chainId,
-      contractAddress,
-      escrowAddress,
-      transactionHash,
-      blockNumber: Math.floor(Date.now() / 1000),
-      gasUsed: BigInt(450000),
-      deploymentCost: BigInt(450000) * BigInt(10000000000),
-    };
   }
 
   /**
@@ -320,7 +460,6 @@ export class DeploymentService {
     }
 
     if (options?.lowCost) {
-      // Prioritize L2s
       chains = chains.sort((a, b) => {
         const l2Priority: Record<ChainId, number> = {
           42161: 1, // Arbitrum
@@ -341,7 +480,7 @@ export class DeploymentService {
   }
 
   /**
-   * Verify contract deployment on chain
+   * Verify contract deployment on chain using real RPC
    */
   async verifyDeployment(
     campaignId: string,
@@ -353,12 +492,39 @@ export class DeploymentService {
       return { verified: false, error: "Deployment not found in registry" };
     }
 
-    // In production, would query the blockchain to verify contract exists
-    // For now, trust the registry
-    return {
-      verified: true,
-      blockNumber: deployment.blockNumber,
-    };
+    try {
+      const provider = this.getProvider(chainId);
+
+      // Verify the contract has code at the address
+      const code = await provider.getCode(deployment.contractAddress);
+
+      if (code === "0x" || code === "0x0") {
+        return {
+          verified: false,
+          error: "No contract code found at the registered address",
+        };
+      }
+
+      // Verify the transaction exists
+      const receipt = await provider.getTransactionReceipt(deployment.transactionHash);
+
+      if (!receipt || receipt.status === 0) {
+        return {
+          verified: false,
+          error: "Deployment transaction not found or reverted",
+        };
+      }
+
+      return {
+        verified: true,
+        blockNumber: receipt.blockNumber,
+      };
+    } catch (error) {
+      return {
+        verified: false,
+        error: `Verification failed: ${(error as Error).message}`,
+      };
+    }
   }
 
   /**
