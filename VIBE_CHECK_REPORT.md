@@ -9,14 +9,14 @@
 
 ## Final Score
 
-| Domain | Weight | Raw Score | Weighted |
-|--------|--------|-----------|----------|
-| **A: Surface Provenance** | 20% | 19.0% | 3.8% |
-| **B: Behavioral Integrity** | 50% | 28.6% | 14.3% |
-| **C: Interface Authenticity** | 30% | 33.3% | 10.0% |
-| **Weighted Authenticity** | | | **28.1%** |
+| Domain | Weight | Scores | Authenticity% | Weighted |
+|--------|--------|--------|--------------|----------|
+| **A: Surface Provenance** | 20% | 9/21 | 14.3% | 2.9% |
+| **B: Behavioral Integrity** | 50% | 10/21 | 21.4% | 10.7% |
+| **C: Interface Authenticity** | 30% | 8/15 | 30.0% | 9.0% |
+| **Weighted Authenticity** | | | | **22.6%** |
 
-### **Vibe-Code Confidence: 71.9% — Predominantly Vibe-Coded**
+### **Vibe-Code Confidence: 77.4% — Predominantly Vibe-Coded**
 
 Classification: **61-85% = Predominantly Vibe-Coded**
 
@@ -61,7 +61,7 @@ Comments in `src/security/auth-service.ts:190-227` explicitly state the code is 
 
 This "in production, do X" pattern appears repeatedly — the AI acknowledges what real code would do while shipping a placeholder.
 
-### A3: Test Quality — Score: 2 (Moderate)
+### A3: Test Quality — Score: 1 (Weak)
 
 **Finding:** Mixed quality. Smart contract tests (`test/PledgeProtocol.integration.test.ts`) are genuinely functional — they deploy real contracts to Hardhat, create campaigns, verify escrow balances, and test fund release flows. These tests exercise real behavior.
 
@@ -103,11 +103,13 @@ File names, class names, method names, and variable names exhibit zero organic v
 
 Every service class follows the same structural template: constructor → public CRUD methods → private helpers. Every route file follows: import → Router() → endpoint handlers → export default router.
 
-### A6: Documentation-Reality Gap — Score: 2 (Moderate)
+### A6: Documentation-Reality Gap — Score: 1 (Weak)
 
 **Finding:** The README.md is 2,240 lines — exhaustively documenting every API endpoint across all 10 phases with request/response examples, tables of enum values, and usage guides. This level of documentation is disproportionate for a codebase where core integrations are mocked.
 
 The README claims features like "Fiat payment processing with automatic settlement to stablecoin escrow" (`src/payments/stripe-provider.ts:70-71`), but the code itself comments: `// In production, this would call Stripe API`. The documentation describes a finished product; the code implements a prototype.
+
+The README (line 3) claims "A NatLangChain application" and dedicates 9 lines to NatLangChain integration (lines 161-169), but `grep -r "NatLangChain\|natlangchain" src/` returns zero results. NatLangChain is not imported, used, or referenced anywhere in code.
 
 The Architecture.md was created as the *second commit* in the repo (before any code existed), suggesting spec-first AI generation.
 
@@ -117,15 +119,11 @@ The Architecture.md was created as the *second commit* in the repo (before any c
 
 No dead imports found within individual files (likely cleaned by the same AI session). But the codebase is over-exported and under-consumed.
 
-**Domain A Raw Score: 4 + 7 + 4 = 9/21 × 100 = 19.0%** (1+2+1+2+1+2+2 = 11... wait let me recalculate)
+**Domain A Scores:** A1=1, A2=1, A3=1, A4=2, A5=1, A6=1, A7=2 → Total: 9/21
 
-**Domain A Scores:** A1=1, A2=1, A3=2, A4=2, A5=1, A6=2, A7=2 → Total: 11/21 → **Raw: 19.0%**
+Using the framework's 1-3 scale where 1=Weak, 3=Strong, minimum possible = 7, maximum = 21:
 
-*Calculation: (11 - 7) / (21 - 7) × 100 = 4/14 × 100 = 28.6%*
-
-Corrected: Using the framework's 1-3 scale where 1=Weak, 3=Strong, minimum possible = 7, maximum = 21:
-
-**Domain A Authenticity: (11 - 7) / (21 - 7) × 100 = 28.6%**
+**Domain A Authenticity: (9 - 7) / (21 - 7) × 100 = 14.3%**
 
 ---
 
@@ -250,21 +248,21 @@ The server's graceful shutdown (`src/api/server.ts:176-186`) stops the job queue
 
 ## Domain C: Interface Authenticity (30%)
 
-### C1: API Consistency — Score: 2 (Moderate)
+### C1: API Consistency — Score: 1 (Weak)
 
-**Finding:** Inconsistent patterns across API generations. Phase 1-6 routes use Zod for validation:
-```typescript
-import { z } from "zod"; // Present in 10 route files
-```
+**Finding:** Five distinct error response formats across routes with no standardization:
 
-Phase 7-10 routes (13+ files) use no validation library at all, relying on manual checks or the custom `validateInput` middleware from `src/security/middleware.ts`. This split indicates different generation passes with different prompting.
+| Route | Format |
+|-------|--------|
+| campaigns.ts | `{error: {code, message}}` |
+| auth.ts | `{success: false, error, details}` |
+| payments.ts | Custom `errorResponse()` helper |
+| webhooks.ts | `{success: false, error, details}` |
+| compliance.ts | Simple `{error: "..."}` |
 
-Error response formats vary:
-- Some routes return `{ error: "message" }`
-- Others return `{ success: false, error: "message", code: "ERROR_CODE" }`
-- Payment routes return `{ error: { code: "...", message: "..." } }`
+Phase 1-6 routes use Zod for validation (`import { z } from "zod"` in 10 files). Phase 7-10 routes (13+ files) use no validation library, relying on manual checks or the custom `validateInput` middleware. This split indicates different generation passes with different prompting.
 
-No consistent pagination envelope across list endpoints.
+Pagination formats also vary: `{campaigns: [], total, limit, offset}` vs `{data: [], count}` vs `{campaigns: [], pagination: {}, facets}`. No consistent envelope across list endpoints.
 
 ### C2: UI Implementation — Score: N/A
 
@@ -315,9 +313,9 @@ Prometheus-style metrics are exposed at `/v1/monitoring/metrics`, but the metric
 
 No distributed tracing (no OpenTelemetry, no correlation IDs propagated through service calls). Request IDs are generated but not threaded through downstream operations.
 
-**Domain C Scores (excluding N/A):** C1=2, C4=2, C5=1, C6=2, C7=2 → Total: 9/15
+**Domain C Scores (excluding N/A):** C1=1, C4=2, C5=1, C6=2, C7=2 → Total: 8/15
 
-**Domain C Authenticity: (9 - 5) / (15 - 5) × 100 = 40.0%**
+**Domain C Authenticity: (8 - 5) / (15 - 5) × 100 = 30.0%**
 
 ---
 
@@ -325,13 +323,13 @@ No distributed tracing (no OpenTelemetry, no correlation IDs propagated through 
 
 | Domain | Scores | Min | Max | Authenticity% | Weight | Weighted |
 |--------|--------|-----|-----|--------------|--------|----------|
-| A (7 criteria) | 11 | 7 | 21 | 28.6% | 0.20 | 5.7% |
+| A (7 criteria) | 9 | 7 | 21 | 14.3% | 0.20 | 2.9% |
 | B (7 criteria) | 10 | 7 | 21 | 21.4% | 0.50 | 10.7% |
-| C (5 criteria) | 9 | 5 | 15 | 40.0% | 0.30 | 12.0% |
+| C (5 criteria) | 8 | 5 | 15 | 30.0% | 0.30 | 9.0% |
 
-**Weighted Authenticity = 5.7% + 10.7% + 12.0% = 28.4%**
+**Weighted Authenticity = 2.9% + 10.7% + 9.0% = 22.6%**
 
-**Vibe-Code Confidence = 100% - 28.4% = 71.6%**
+**Vibe-Code Confidence = 100% - 22.6% = 77.4%**
 
 **Classification: Predominantly Vibe-Coded (61-85%)**
 
