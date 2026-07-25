@@ -455,7 +455,8 @@ export class SocialService {
     }
 
     if (options.author) {
-      comments = comments.filter((c) => c.author === options.author.toLowerCase());
+      const author = options.author.toLowerCase();
+      comments = comments.filter((c) => c.author === author);
     }
 
     if (options.parentId !== undefined) {
@@ -467,16 +468,25 @@ export class SocialService {
     }
 
     // Sort
+    // `createdAt` is millisecond-resolution, so comments posted in the same
+    // millisecond tie; break those ties by insertion order (Map iteration
+    // order) so ordering stays consistent with creation order.
+    const insertionOrder = new Map(
+      comments.map((comment, index) => [comment.id, index])
+    );
+    const byInsertion = (a: Comment, b: Comment) =>
+      insertionOrder.get(a.id)! - insertionOrder.get(b.id)!;
+
     switch (options.sortBy) {
       case "popular":
-        comments.sort((a, b) => b.likes - a.likes);
+        comments.sort((a, b) => b.likes - a.likes || byInsertion(a, b));
         break;
       case "oldest":
-        comments.sort((a, b) => a.createdAt - b.createdAt);
+        comments.sort((a, b) => a.createdAt - b.createdAt || byInsertion(a, b));
         break;
       case "recent":
       default:
-        comments.sort((a, b) => b.createdAt - a.createdAt);
+        comments.sort((a, b) => b.createdAt - a.createdAt || byInsertion(b, a));
     }
 
     // Pagination

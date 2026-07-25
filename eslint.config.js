@@ -24,6 +24,20 @@ export default tseslint.config(
     },
   },
   {
+    // Chai's assertions are property getters (`expect(x).to.be.true`), which
+    // read as unused expressions to ESLint. Mocha/vitest globals also need
+    // declaring for the suites that rely on them rather than importing.
+    files: ["test/**/*.ts"],
+    languageOptions: {
+      globals: {
+        ...globals.mocha,
+      },
+    },
+    rules: {
+      "@typescript-eslint/no-unused-expressions": "off",
+    },
+  },
+  {
     ignores: [
       "node_modules/",
       "dist/",

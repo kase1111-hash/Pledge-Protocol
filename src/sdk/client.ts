@@ -79,7 +79,11 @@ class HTTPClient {
 
         clearTimeout(timeoutId);
 
-        const data = await response.json();
+        const data = (await response.json()) as {
+          error?: string;
+          code?: string;
+          data?: unknown;
+        };
 
         if (!response.ok) {
           return {
@@ -92,7 +96,7 @@ class HTTPClient {
 
         return {
           success: true,
-          data: data.data || data,
+          data: (data.data ?? data) as T,
           requestId: response.headers.get("X-Request-ID") || undefined,
         };
       } catch (error) {

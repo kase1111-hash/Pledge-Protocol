@@ -1,3 +1,4 @@
+import { describe, it, beforeEach } from "vitest";
 import { expect } from "chai";
 import {
   ImageGenerator,
@@ -115,7 +116,8 @@ describe("Token System (Phase 3)", function () {
 
         expect(result.svg).to.include("Midnight Dreams");
         expect(result.svg).to.include("The Starlight Band");
-        expect(result.svg).to.include("Indie Rock");
+        // Genre is rendered as a letter-spaced uppercase label
+        expect(result.svg).to.include("INDIE ROCK");
       });
     });
 

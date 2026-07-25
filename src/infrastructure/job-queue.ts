@@ -397,8 +397,15 @@ export class JobQueue {
       jobs = jobs.filter((j) => j.priority === options.priority);
     }
 
-    // Sort by created time descending
-    jobs.sort((a, b) => b.createdAt - a.createdAt);
+    // Sort by created time descending. `createdAt` is millisecond-resolution,
+    // so jobs queued in the same millisecond tie; break those ties by
+    // insertion order (Map iteration order) so the newest still sorts first.
+    const insertionOrder = new Map(jobs.map((job, index) => [job.id, index]));
+    jobs.sort(
+      (a, b) =>
+        b.createdAt - a.createdAt ||
+        insertionOrder.get(b.id)! - insertionOrder.get(a.id)!
+    );
 
     if (options?.limit) {
       jobs = jobs.slice(0, options.limit);

@@ -35,7 +35,7 @@ export class StripeProvider implements PaymentProviderInterface {
   name: PaymentProvider = "stripe";
 
   private config: StripeConfig;
-  private stripe: Stripe;
+  private stripeClient?: Stripe;
 
   // Local index for mapping our session IDs to Stripe session IDs
   private sessionIndex: Map<string, { stripeSessionId: string; session: CheckoutSession }> =
@@ -43,7 +43,25 @@ export class StripeProvider implements PaymentProviderInterface {
 
   constructor(config: StripeConfig) {
     this.config = config;
-    this.stripe = new Stripe(config.secretKey);
+  }
+
+  /**
+   * The Stripe SDK throws when constructed without a secret key, which would
+   * make merely importing this module fail wherever payments are unconfigured
+   * (local dev, tests, deployments that don't take card payments). Construct
+   * it on first use instead, so the failure surfaces at the call that actually
+   * needs Stripe.
+   */
+  private get stripe(): Stripe {
+    if (!this.stripeClient) {
+      if (!this.config.secretKey) {
+        throw new Error(
+          "Stripe is not configured: set STRIPE_SECRET_KEY to use card payments"
+        );
+      }
+      this.stripeClient = new Stripe(this.config.secretKey);
+    }
+    return this.stripeClient;
   }
 
   // ==========================================================================

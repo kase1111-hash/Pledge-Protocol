@@ -28,21 +28,21 @@ describe("Phase 6: Governance", () => {
         const dispute = await disputeService.createDispute(
           {
             campaignId: "campaign-1",
-            pledgeId: "pledge-1",
+            pledgeIds: ["pledge-1"],
             milestoneId: "milestone-1",
-            category: "oracle_disagreement",
+            category: "milestone_dispute",
             title: "Oracle data mismatch",
             description: "The oracle reported incorrect data",
-            initialTier: "community",
           },
           "0xBacker123"
         );
 
         expect(dispute).toBeDefined();
-        expect(dispute.id).toMatch(/^dispute-/);
+        expect(dispute.id).toMatch(/^dispute_/);
         expect(dispute.status).toBe("pending");
-        expect(dispute.category).toBe("oracle_disagreement");
-        expect(dispute.tier).toBe("community");
+        expect(dispute.category).toBe("milestone_dispute");
+        // Tier is derived from the category, not supplied by the caller.
+        expect(dispute.currentTier).toBe("community");
         expect(dispute.raisedBy).toBe("0xBacker123");
       });
 
@@ -57,7 +57,7 @@ describe("Phase 6: Governance", () => {
           "0xUser"
         );
 
-        expect(technicalDispute.tier).toBe("automated");
+        expect(technicalDispute.currentTier).toBe("automated");
 
         const fraudDispute = await disputeService.createDispute(
           {
@@ -69,7 +69,19 @@ describe("Phase 6: Governance", () => {
           "0xUser"
         );
 
-        expect(fraudDispute.tier).toBe("council");
+        expect(fraudDispute.currentTier).toBe("council");
+
+        const milestoneDispute = await disputeService.createDispute(
+          {
+            campaignId: "campaign-3",
+            category: "milestone_dispute",
+            title: "Milestone contested",
+            description: "Backers dispute the milestone",
+          },
+          "0xUser"
+        );
+
+        expect(milestoneDispute.currentTier).toBe("community");
       });
 
       it("should reject invalid dispute data", async () => {
@@ -104,55 +116,53 @@ describe("Phase 6: Governance", () => {
       });
 
       it("should submit evidence to a dispute", async () => {
-        const evidence = await disputeService.submitEvidence(
-          disputeId,
-          "0xBacker",
-          "document",
-          "Screenshot of incomplete milestone",
-          "https://evidence.example.com/screenshot.png"
-        );
+        const evidence = await disputeService.submitEvidence(disputeId, "0xBacker", {
+          type: "screenshot",
+          title: "Screenshot of incomplete milestone",
+          description: "Shows the milestone was not delivered",
+          content: "https://evidence.example.com/screenshot.png",
+        });
 
         expect(evidence).toBeDefined();
-        expect(evidence.id).toMatch(/^evidence-/);
+        expect(evidence.id).toMatch(/^ev_/);
         expect(evidence.disputeId).toBe(disputeId);
-        expect(evidence.type).toBe("document");
+        expect(evidence.type).toBe("screenshot");
+        expect(evidence.verified).toBe(false);
       });
 
       it("should track evidence from multiple parties", async () => {
-        await disputeService.submitEvidence(
-          disputeId,
-          "0xBacker",
-          "document",
-          "Backer evidence",
-          "https://backer.example.com/evidence"
-        );
+        await disputeService.submitEvidence(disputeId, "0xBacker", {
+          type: "document",
+          title: "Backer evidence",
+          description: "Backer's account",
+          content: "https://backer.example.com/evidence",
+        });
 
-        await disputeService.submitEvidence(
-          disputeId,
-          "0xCreator",
-          "document",
-          "Creator response",
-          "https://creator.example.com/response"
-        );
+        await disputeService.submitEvidence(disputeId, "0xCreator", {
+          type: "document",
+          title: "Creator response",
+          description: "Creator's account",
+          content: "https://creator.example.com/response",
+        });
 
-        const dispute = disputeService.getDispute(disputeId);
-        expect(dispute?.evidence.length).toBe(2);
+        const evidence = disputeService.getEvidence(disputeId);
+        expect(evidence.length).toBe(2);
+        expect(evidence.map((e) => e.submittedBy)).toEqual(["0xBacker", "0xCreator"]);
       });
 
       it("should reject evidence for closed disputes", async () => {
         const dispute = disputeService.getDispute(disputeId);
         if (dispute) {
-          (dispute as any).status = "closed";
+          dispute.status = "closed";
         }
 
         await expect(
-          disputeService.submitEvidence(
-            disputeId,
-            "0xUser",
-            "document",
-            "Late evidence",
-            "https://example.com"
-          )
+          disputeService.submitEvidence(disputeId, "0xUser", {
+            type: "document",
+            title: "Late evidence",
+            description: "Submitted after close",
+            content: "https://example.com",
+          })
         ).rejects.toThrow();
       });
     });
@@ -175,7 +185,6 @@ describe("Phase 6: Governance", () => {
             category: "oracle_disagreement",
             title: "Test dispute",
             description: "Testing voting process",
-            initialTier: "community",
           },
           "0xBacker"
         );
@@ -187,7 +196,9 @@ describe("Phase 6: Governance", () => {
 
         const dispute = disputeService.getDispute(disputeId);
         expect(dispute?.status).toBe("voting");
-        expect(dispute?.votingDeadline).toBeDefined();
+        expect(dispute?.votingEnabled).toBe(true);
+        expect(dispute?.votingEndsAt).toBeDefined();
+        expect(dispute?.eligibleVoters).toEqual(voters);
       });
 
       it("should cast votes with voting power", async () => {
@@ -198,6 +209,7 @@ describe("Phase 6: Governance", () => {
           "0xVoter1",
           BigInt(100),
           "release",
+          undefined,
           "Creator completed the work"
         );
 
@@ -214,7 +226,7 @@ describe("Phase 6: Governance", () => {
 
         await expect(
           disputeService.castVote(disputeId, "0xVoter1", BigInt(100), "refund")
-        ).rejects.toThrow("already voted");
+        ).rejects.toThrow("Already voted");
       });
 
       it("should reject votes from non-eligible voters", async () => {
@@ -239,7 +251,7 @@ describe("Phase 6: Governance", () => {
         expect(tally).toBeDefined();
         expect(tally.release).toBe(BigInt(300));
         expect(tally.refund).toBe(BigInt(200));
-        expect(tally.winningOption).toBe("release");
+        expect(tally.leadingOption).toBe("release");
       });
     });
 
@@ -253,7 +265,6 @@ describe("Phase 6: Governance", () => {
             category: "milestone_dispute",
             title: "Complex dispute",
             description: "Requires escalation",
-            initialTier: "community",
           },
           "0xBacker"
         );
@@ -261,19 +272,34 @@ describe("Phase 6: Governance", () => {
       });
 
       it("should escalate dispute to higher tier", async () => {
+        // milestone_dispute starts at the community tier.
         await disputeService.escalate(disputeId, "Community vote was inconclusive");
 
         const dispute = disputeService.getDispute(disputeId);
         expect(dispute?.status).toBe("escalated");
-        expect(dispute?.tier).toBe("creator");
+        expect(dispute?.currentTier).toBe("creator");
       });
 
-      it("should track escalation history", async () => {
+      it("should record each escalation on the timeline", async () => {
         await disputeService.escalate(disputeId, "First escalation");
         await disputeService.escalate(disputeId, "Second escalation");
 
         const dispute = disputeService.getDispute(disputeId);
-        expect(dispute?.escalationHistory?.length).toBe(2);
+        expect(dispute?.currentTier).toBe("council");
+
+        const escalations = disputeService
+          .getTimeline(disputeId)
+          .filter((event) => event.type === "tier_escalated");
+        expect(escalations.length).toBe(2);
+      });
+
+      it("should refuse to escalate beyond the highest tier", async () => {
+        await disputeService.escalate(disputeId, "To creator");
+        await disputeService.escalate(disputeId, "To council");
+
+        await expect(
+          disputeService.escalate(disputeId, "Nowhere left to go")
+        ).rejects.toThrow("highest tier");
       });
     });
 
@@ -296,36 +322,48 @@ describe("Phase 6: Governance", () => {
       it("should resolve dispute with release decision", async () => {
         const resolved = await disputeService.resolve(disputeId, {
           outcome: "release",
+          releasePercent: 100,
+          refundPercent: 0,
           rationale: "Oracle was temporarily unavailable but creator fulfilled obligation",
-          resolvedBy: "0xAdmin",
+          decidedBy: "council",
+          evidenceIds: [],
         });
 
         expect(resolved.status).toBe("resolved");
-        expect(resolved.resolution?.outcome).toBe("release");
+        expect(resolved.decision?.outcome).toBe("release");
+        expect(resolved.decision?.releasePercent).toBe(100);
+        expect(resolved.decision?.appealable).toBe(true);
       });
 
       it("should resolve dispute with refund decision", async () => {
         const resolved = await disputeService.resolve(disputeId, {
           outcome: "refund",
+          releasePercent: 0,
+          refundPercent: 100,
           rationale: "Milestone clearly not met",
-          resolvedBy: "0xAdmin",
+          decidedBy: "council",
+          evidenceIds: [],
         });
 
         expect(resolved.status).toBe("resolved");
-        expect(resolved.resolution?.outcome).toBe("refund");
+        expect(resolved.decision?.outcome).toBe("refund");
+        expect(resolved.decision?.refundPercent).toBe(100);
       });
 
       it("should resolve dispute with partial decision", async () => {
         const resolved = await disputeService.resolve(disputeId, {
           outcome: "partial",
-          partialPercentage: 60,
+          releasePercent: 60,
+          refundPercent: 40,
           rationale: "Milestone partially completed",
-          resolvedBy: "0xAdmin",
+          decidedBy: "council",
+          evidenceIds: [],
         });
 
         expect(resolved.status).toBe("resolved");
-        expect(resolved.resolution?.outcome).toBe("partial");
-        expect(resolved.resolution?.partialPercentage).toBe(60);
+        expect(resolved.decision?.outcome).toBe("partial");
+        expect(resolved.decision?.releasePercent).toBe(60);
+        expect(resolved.decision?.refundPercent).toBe(40);
       });
     });
 
@@ -346,26 +384,52 @@ describe("Phase 6: Governance", () => {
 
         await disputeService.resolve(disputeId, {
           outcome: "release",
+          releasePercent: 100,
+          refundPercent: 0,
           rationale: "Calculation was correct",
-          resolvedBy: "0xAdmin",
+          decidedBy: "automated",
+          evidenceIds: [],
         });
       });
 
       it("should allow appeal of resolved disputes", async () => {
         await disputeService.appeal(disputeId, "0xBacker", "New evidence found");
 
+        // Filing an appeal escalates the dispute to the next tier, so the
+        // final status is "escalated"; the appeal itself is on the timeline.
         const dispute = disputeService.getDispute(disputeId);
-        expect(dispute?.status).toBe("appealed");
+        expect(dispute?.status).toBe("escalated");
+
+        const appeals = disputeService
+          .getTimeline(disputeId)
+          .filter((event) => event.type === "appealed");
+        expect(appeals.length).toBe(1);
+        expect(appeals[0].actor).toBe("0xBacker");
+      });
+
+      it("should reject appeals of unresolved disputes", async () => {
+        const unresolved = await disputeService.createDispute(
+          {
+            campaignId: "campaign-9",
+            category: "calculation_error",
+            title: "Still open",
+            description: "This dispute has not been resolved yet",
+          },
+          "0xBacker"
+        );
+
+        await expect(
+          disputeService.appeal(unresolved.id, "0xBacker", "Too early")
+        ).rejects.toThrow("Can only appeal resolved disputes");
       });
 
       it("should escalate tier on appeal", async () => {
-        const originalDispute = disputeService.getDispute(disputeId);
-        const originalTier = originalDispute?.tier;
+        const originalTier = disputeService.getDispute(disputeId)?.currentTier;
 
         await disputeService.appeal(disputeId, "0xBacker", "Appeal reason");
 
         const appealedDispute = disputeService.getDispute(disputeId);
-        expect(appealedDispute?.tier).not.toBe(originalTier);
+        expect(appealedDispute?.currentTier).not.toBe(originalTier);
       });
     });
 
@@ -438,8 +502,11 @@ describe("Phase 6: Governance", () => {
 
         await disputeService.resolve(d1.id, {
           outcome: "release",
+          releasePercent: 100,
+          refundPercent: 0,
           rationale: "Resolved",
-          resolvedBy: "0xAdmin",
+          decidedBy: "council",
+          evidenceIds: [],
         });
 
         await disputeService.createDispute(
@@ -475,6 +542,26 @@ describe("Phase 6: Governance", () => {
       notificationService = new NotificationService();
     });
 
+    /**
+     * In-app notifications are only produced by emit(), so tests that need
+     * stored notifications raise a real event addressed to the recipient.
+     */
+    const emitTo = (
+      recipient: string,
+      type: NotificationEventType,
+      summary: string
+    ) =>
+      notificationService.emit({
+        type,
+        source: "test",
+        campaignId: "campaign-1",
+        actorAddress: recipient,
+        actorType: "backer",
+        summary,
+        priority: "normal",
+        data: {},
+      });
+
     describe("Webhook Management", () => {
       it("should create a webhook", () => {
         const webhook = notificationService.createWebhook(
@@ -488,7 +575,7 @@ describe("Phase 6: Governance", () => {
         );
 
         expect(webhook).toBeDefined();
-        expect(webhook.id).toMatch(/^webhook-/);
+        expect(webhook.id).toMatch(/^webhook_/);
         expect(webhook.name).toBe("Test Webhook");
         expect(webhook.events).toContain("campaign_created");
         expect(webhook.active).toBe(true);
@@ -573,27 +660,38 @@ describe("Phase 6: Governance", () => {
             name: "Test Webhook",
             url: "https://example.com/webhook",
             events: ["campaign_created"],
+            // Fail fast: there is no endpoint behind this URL.
+            retryCount: 0,
+            timeout: 100,
           },
           "0xCreator"
         );
 
-        // This will attempt to deliver but fail (no real endpoint)
+        // Webhook delivery fails (no real endpoint), but the in-app
+        // notification for the actor is still created.
         await notificationService.emit({
           type: "campaign_created",
+          source: "campaign-service",
           campaignId: "campaign-1",
+          actorAddress: "0xCreator",
+          actorType: "creator",
+          summary: "Test Campaign was created",
+          priority: "normal",
           data: {
             name: "Test Campaign",
             creator: "0xCreator",
           },
         });
 
-        // Check that notification was created
         const notifications = notificationService.getNotifications({
           recipient: "0xCreator",
         });
 
-        // Notification should be created (delivery may fail)
-        expect(notifications.length).toBeGreaterThanOrEqual(0);
+        expect(notifications.length).toBe(1);
+        expect(notifications[0].eventType).toBe("campaign_created");
+        expect(notifications[0].channel).toBe("in_app");
+        expect(notifications[0].message).toBe("Test Campaign was created");
+        expect(notifications[0].status).toBe("delivered");
       });
 
       it("should filter events by campaign ID", async () => {
@@ -616,98 +714,97 @@ describe("Phase 6: Governance", () => {
     describe("Notification Preferences", () => {
       it("should set notification preferences", () => {
         const prefs = notificationService.setPreferences("0xUser", {
-          email: true,
-          push: false,
-          enabledEvents: ["campaign_created", "pledge_released"],
+          email: "user@example.com",
+          preferences: {
+            campaign_created: { enabled: true, channels: ["in_app", "email"] },
+            pledge_created: { enabled: false, channels: [] },
+          },
         });
 
-        expect(prefs.email).toBe(true);
-        expect(prefs.push).toBe(false);
-        expect(prefs.enabledEvents).toContain("campaign_created");
+        expect(prefs.address).toBe("0xUser");
+        expect(prefs.email).toBe("user@example.com");
+        expect(prefs.preferences.campaign_created?.enabled).toBe(true);
+        expect(prefs.preferences.campaign_created?.channels).toContain("in_app");
+        expect(prefs.preferences.pledge_created?.enabled).toBe(false);
+        // Digest mode defaults to instant.
+        expect(prefs.digestMode).toBe("instant");
       });
 
-      it("should get notification preferences", () => {
+      it("should merge preferences on update rather than replacing them", () => {
         notificationService.setPreferences("0xUser", {
-          email: true,
-          inApp: false,
+          email: "user@example.com",
+          preferences: {
+            campaign_created: { enabled: true, channels: ["in_app"] },
+          },
+        });
+
+        notificationService.setPreferences("0xUser", {
+          preferences: {
+            pledge_created: { enabled: true, channels: ["email"] },
+          },
         });
 
         const prefs = notificationService.getPreferences("0xUser");
-        expect(prefs.email).toBe(true);
-        expect(prefs.inApp).toBe(false);
+        expect(prefs?.email).toBe("user@example.com");
+        expect(prefs?.preferences.campaign_created?.enabled).toBe(true);
+        expect(prefs?.preferences.pledge_created?.enabled).toBe(true);
       });
 
-      it("should return default preferences for new users", () => {
-        const prefs = notificationService.getPreferences("0xNewUser");
-
-        // Should have some defaults
-        expect(prefs).toBeDefined();
-        expect(prefs.inApp).toBe(true);
+      it("should return undefined for users with no preferences set", () => {
+        expect(notificationService.getPreferences("0xNewUser")).toBeUndefined();
       });
     });
 
     describe("Unread Count", () => {
-      it("should track unread notifications", () => {
-        // Create some notifications
-        notificationService.createNotification({
-          type: "campaign_created",
-          recipient: "0xUser",
-          campaignId: "campaign-1",
-          title: "Test 1",
-          message: "Test message 1",
-        });
-
-        notificationService.createNotification({
-          type: "pledge_created",
-          recipient: "0xUser",
-          campaignId: "campaign-1",
-          title: "Test 2",
-          message: "Test message 2",
-        });
+      it("should track unread notifications", async () => {
+        await emitTo("0xUser", "campaign_created", "Test message 1");
+        await emitTo("0xUser", "pledge_created", "Test message 2");
 
         const unreadCount = notificationService.getUnreadCount("0xUser");
         expect(unreadCount).toBe(2);
       });
 
-      it("should mark notifications as read", () => {
-        const notification = notificationService.createNotification({
-          type: "campaign_created",
+      it("should mark notifications as read", async () => {
+        await emitTo("0xUser", "campaign_created", "Test message");
+
+        const [notification] = notificationService.getNotifications({
           recipient: "0xUser",
-          campaignId: "campaign-1",
-          title: "Test",
-          message: "Test message",
         });
+        expect(notificationService.markAsRead(notification.id)).toBe(true);
 
-        notificationService.markAsRead("0xUser", notification.id);
+        expect(notificationService.getUnreadCount("0xUser")).toBe(0);
+      });
 
-        const unreadCount = notificationService.getUnreadCount("0xUser");
-        expect(unreadCount).toBe(0);
+      it("should mark all notifications as read", async () => {
+        await emitTo("0xUser", "campaign_created", "One");
+        await emitTo("0xUser", "pledge_created", "Two");
+
+        expect(notificationService.markAllAsRead("0xUser")).toBe(2);
+        expect(notificationService.getUnreadCount("0xUser")).toBe(0);
       });
     });
 
     describe("Statistics", () => {
-      it("should return notification statistics", () => {
+      it("should return notification statistics", async () => {
         notificationService.createWebhook(
           {
             name: "Webhook 1",
             url: "https://example.com/webhook",
             events: ["campaign_created"],
+            retryCount: 0,
+            timeout: 100,
           },
           "0xCreator"
         );
 
-        notificationService.createNotification({
-          type: "campaign_created",
-          recipient: "0xUser",
-          campaignId: "campaign-1",
-          title: "Test",
-          message: "Test message",
-        });
+        await emitTo("0xUser", "campaign_created", "Test message");
 
         const stats = notificationService.getStatistics();
 
         expect(stats.webhookCount).toBe(1);
         expect(stats.totalNotifications).toBe(1);
+        expect(stats.byChannel.in_app).toBe(1);
+        expect(stats.byEventType.campaign_created).toBe(1);
       });
     });
   });
@@ -729,7 +826,8 @@ describe("Phase 6: Governance", () => {
         description: "Training for a marathon with weekly milestones",
         category: "fitness",
         status: "active",
-        creator: "0xCreator1",
+        creatorAddress: "0xCreator1",
+        beneficiaryAddress: "0xBeneficiary1",
         totalPledged: BigInt(1000),
         goalAmount: BigInt(5000),
         backerCount: 10,
@@ -739,7 +837,9 @@ describe("Phase 6: Governance", () => {
         trendingScore: 85,
         milestoneCount: 4,
         completedMilestones: 2,
+        oracleTypes: ["race_timing"],
         tags: ["marathon", "running", "fitness"],
+        keywords: ["marathon", "training"],
         createdAt: Date.now() - 86400000 * 7, // 7 days ago
         deadline: Date.now() + 86400000 * 30, // 30 days from now
       });
@@ -750,7 +850,8 @@ describe("Phase 6: Governance", () => {
         description: "Building an open source library for developers",
         category: "opensource",
         status: "active",
-        creator: "0xCreator2",
+        creatorAddress: "0xCreator2",
+        beneficiaryAddress: "0xBeneficiary2",
         totalPledged: BigInt(2500),
         goalAmount: BigInt(10000),
         backerCount: 25,
@@ -760,7 +861,9 @@ describe("Phase 6: Governance", () => {
         trendingScore: 95,
         milestoneCount: 6,
         completedMilestones: 3,
+        oracleTypes: ["github"],
         tags: ["opensource", "programming", "library"],
+        keywords: ["opensource", "library"],
         createdAt: Date.now() - 86400000 * 14, // 14 days ago
         deadline: Date.now() + 86400000 * 60, // 60 days from now
       });
@@ -771,7 +874,8 @@ describe("Phase 6: Governance", () => {
         description: "Funding for a research paper on climate change",
         category: "research",
         status: "resolved",
-        creator: "0xCreator3",
+        creatorAddress: "0xCreator3",
+        beneficiaryAddress: "0xBeneficiary3",
         totalPledged: BigInt(5000),
         goalAmount: BigInt(5000),
         backerCount: 50,
@@ -781,7 +885,9 @@ describe("Phase 6: Governance", () => {
         trendingScore: 70,
         milestoneCount: 3,
         completedMilestones: 3,
+        oracleTypes: ["academic"],
         tags: ["research", "academic", "climate"],
+        keywords: ["research", "climate"],
         createdAt: Date.now() - 86400000 * 30, // 30 days ago
         resolvedAt: Date.now() - 86400000 * 5, // 5 days ago
       });
@@ -844,7 +950,7 @@ describe("Phase 6: Governance", () => {
     describe("Sorting", () => {
       it("should sort by trending score descending", () => {
         const result = searchService.search({
-          sort: { field: "trendingScore", order: "desc" },
+          sort: { field: "trending_score", order: "desc" },
         });
 
         expect(result.campaigns[0].trendingScore).toBeGreaterThanOrEqual(
@@ -854,7 +960,7 @@ describe("Phase 6: Governance", () => {
 
       it("should sort by total pledged ascending", () => {
         const result = searchService.search({
-          sort: { field: "totalPledged", order: "asc" },
+          sort: { field: "total_pledged", order: "asc" },
         });
 
         expect(Number(result.campaigns[0].totalPledged)).toBeLessThanOrEqual(
@@ -864,7 +970,7 @@ describe("Phase 6: Governance", () => {
 
       it("should sort by backer count", () => {
         const result = searchService.search({
-          sort: { field: "backerCount", order: "desc" },
+          sort: { field: "backer_count", order: "desc" },
         });
 
         expect(result.campaigns[0].backerCount).toBeGreaterThanOrEqual(
@@ -952,7 +1058,7 @@ describe("Phase 6: Governance", () => {
     describe("Featured", () => {
       it("should get featured campaigns", () => {
         // Mark a campaign as featured
-        searchService.featureCampaign("campaign-1");
+        searchService.setFeatured("campaign-1", true);
 
         const featured = searchService.getFeatured(10);
 
@@ -962,8 +1068,8 @@ describe("Phase 6: Governance", () => {
       });
 
       it("should unfeature campaigns", () => {
-        searchService.featureCampaign("campaign-1");
-        searchService.unfeatureCampaign("campaign-1");
+        searchService.setFeatured("campaign-1", true);
+        searchService.setFeatured("campaign-1", false);
 
         const featured = searchService.getFeatured(10);
 
@@ -1036,7 +1142,8 @@ describe("Phase 6: Governance", () => {
           description: "Updated description",
           category: "fitness",
           status: "active",
-          creator: "0xCreator1",
+          creatorAddress: "0xCreator1",
+          beneficiaryAddress: "0xBeneficiary1",
           totalPledged: BigInt(2000), // Updated
           backerCount: 20, // Updated
           pledgeCount: 25,
@@ -1045,7 +1152,9 @@ describe("Phase 6: Governance", () => {
           trendingScore: 90,
           milestoneCount: 4,
           completedMilestones: 3,
+          oracleTypes: ["race_timing"],
           tags: ["marathon", "running", "fitness"],
+          keywords: ["marathon", "training"],
           createdAt: Date.now() - 86400000 * 7,
         });
 

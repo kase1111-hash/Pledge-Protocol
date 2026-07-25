@@ -91,6 +91,9 @@ interface ICampaignRegistry {
     /// @notice Gets campaign data
     function getCampaign(bytes32 campaignId) external view returns (Campaign memory);
 
+    /// @notice Gets the beneficiary address for a campaign
+    function getBeneficiary(bytes32 campaignId) external view returns (address);
+
     /// @notice Checks if a campaign exists
     function campaignExists(bytes32 campaignId) external view returns (bool);
 

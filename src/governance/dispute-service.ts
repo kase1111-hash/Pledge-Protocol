@@ -41,6 +41,19 @@ export class DisputeService {
     request: CreateDisputeRequest,
     raisedBy: string
   ): Promise<Dispute> {
+    if (!request.campaignId?.trim()) {
+      throw new Error("campaignId is required to raise a dispute");
+    }
+    if (!request.title?.trim()) {
+      throw new Error("title is required to raise a dispute");
+    }
+    if (!request.description?.trim()) {
+      throw new Error("description is required to raise a dispute");
+    }
+    if (!raisedBy?.trim()) {
+      throw new Error("raisedBy is required to raise a dispute");
+    }
+
     const id = this.generateDisputeId();
     const now = Date.now();
 
@@ -722,6 +735,10 @@ export class DisputeService {
 
     const { leadingOption, leadingPercent } = dispute.voteTally;
 
+    // Abstain is never a resolvable outcome — leave the dispute open for
+    // escalation rather than resolving it with a 0/0 split.
+    if (leadingOption === "abstain") return;
+
     let releasePercent = 0;
     let refundPercent = 0;
 
@@ -753,7 +770,7 @@ export class DisputeService {
     }
 
     await this.resolve(dispute.id, {
-      outcome: leadingOption === "partial" ? "partial" : leadingOption,
+      outcome: leadingOption,
       releasePercent,
       refundPercent,
       decidedBy: "community",

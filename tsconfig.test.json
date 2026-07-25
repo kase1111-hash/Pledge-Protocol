@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    // Vitest supplies describe/it/expect for the suites it runs. Without this,
+    // @types/mocha's globals win and vitest-only APIs (describe.skipIf, the
+    // per-test timeout argument) fail to typecheck.
+    "types": ["node", "vitest/globals"]
+  },
+  "include": ["src/**/*", "test/**/*", "scripts/**/*", "hardhat.config.ts"]
+}

@@ -3,7 +3,7 @@
  * Phase 4: Per-unit, Tiered, and Conditional pledge tests
  */
 
-import { describe, it, expect, beforeEach } from "@jest/globals";
+import { describe, it, expect, beforeEach } from "vitest";
 
 // Mock types matching the implementation
 interface Tier {

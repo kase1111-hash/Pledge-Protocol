@@ -399,10 +399,16 @@ export class GdprService {
     request.status = "pending";
     request.confirmedAt = Date.now();
 
+    // Snapshot the confirmed state before kicking off processing: the
+    // deletion runs in the background and mutates this same record, so
+    // returning the live object would hand the caller a value that changes
+    // underneath them.
+    const confirmed: DataDeletionRequest = { ...request };
+
     // Process immediately or wait for scheduled time
     this.processDeletion(requestId);
 
-    return request;
+    return confirmed;
   }
 
   async cancelDeletion(requestId: string): Promise<DataDeletionRequest> {

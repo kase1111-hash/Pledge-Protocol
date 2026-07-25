@@ -1,4 +1,5 @@
 import { EventEmitter } from "events";
+import { randomUUID } from "crypto";
 import { OracleRouter } from "./router";
 import {
   MilestoneCondition,
@@ -90,7 +91,9 @@ export class ResolutionEngine extends EventEmitter {
     campaignId: string,
     triggeredBy: "manual" | "webhook" | "poll" | "schedule"
   ): Promise<ResolutionJob> {
-    const jobId = `res_${campaignId}_${Date.now()}`;
+    // A timestamp alone collides when a campaign is triggered twice within the
+    // same millisecond, which silently overwrote the earlier job in this.jobs.
+    const jobId = `res_${campaignId}_${randomUUID().replace(/-/g, "")}`;
 
     const job: ResolutionJob = {
       id: jobId,

@@ -1,19 +1,20 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-network-helpers";
-import {
-  CampaignRegistry,
-  EscrowVault,
-  PledgeManager,
-  OracleRegistry,
+// Aliased because the local factory consts below shadow these names.
+import type {
+  CampaignRegistry as CampaignRegistryContract,
+  EscrowVault as EscrowVaultContract,
+  PledgeManager as PledgeManagerContract,
+  OracleRegistry as OracleRegistryContract,
 } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 
 describe("Pledge Protocol Integration", function () {
-  let campaignRegistry: CampaignRegistry;
-  let escrowVault: EscrowVault;
-  let pledgeManager: PledgeManager;
-  let oracleRegistry: OracleRegistry;
+  let campaignRegistry: CampaignRegistryContract;
+  let escrowVault: EscrowVaultContract;
+  let pledgeManager: PledgeManagerContract;
+  let oracleRegistry: OracleRegistryContract;
 
   let owner: SignerWithAddress;
   let creator: SignerWithAddress;
@@ -30,23 +31,25 @@ describe("Pledge Protocol Integration", function () {
 
     // Deploy contracts
     const CampaignRegistry = await ethers.getContractFactory("CampaignRegistry");
-    campaignRegistry = await CampaignRegistry.deploy();
+    campaignRegistry = (await CampaignRegistry.deploy()) as unknown as CampaignRegistryContract;
     await campaignRegistry.waitForDeployment();
 
     const EscrowVault = await ethers.getContractFactory("EscrowVault");
-    escrowVault = await EscrowVault.deploy(await campaignRegistry.getAddress());
+    escrowVault = (await EscrowVault.deploy(
+      await campaignRegistry.getAddress()
+    )) as unknown as EscrowVaultContract;
     await escrowVault.waitForDeployment();
 
     const OracleRegistry = await ethers.getContractFactory("OracleRegistry");
-    oracleRegistry = await OracleRegistry.deploy();
+    oracleRegistry = (await OracleRegistry.deploy()) as unknown as OracleRegistryContract;
     await oracleRegistry.waitForDeployment();
 
     const PledgeManager = await ethers.getContractFactory("PledgeManager");
-    pledgeManager = await PledgeManager.deploy(
+    pledgeManager = (await PledgeManager.deploy(
       await campaignRegistry.getAddress(),
       await escrowVault.getAddress(),
       await oracleRegistry.getAddress()
-    );
+    )) as unknown as PledgeManagerContract;
     await pledgeManager.waitForDeployment();
 
     // Set up permissions
@@ -161,9 +164,6 @@ describe("Pledge Protocol Integration", function () {
       ) as any;
       const pledgeId = pledgeEvent.args[0];
 
-      // Get beneficiary balance before
-      const beneficiaryBalanceBefore = await ethers.provider.getBalance(beneficiary.address);
-
       // Resolve pledge (milestone completed)
       await pledgeManager.resolvePledge(pledgeId, pledgeAmount, 0);
 
@@ -172,9 +172,27 @@ describe("Pledge Protocol Integration", function () {
       expect(pledge.status).to.equal(1); // Resolved
       expect(pledge.finalAmount).to.equal(pledgeAmount);
 
-      // Verify funds released to beneficiary
-      const beneficiaryBalanceAfter = await ethers.provider.getBalance(beneficiary.address);
-      expect(beneficiaryBalanceAfter - beneficiaryBalanceBefore).to.equal(pledgeAmount);
+      // The vault uses a pull-payment pattern: releasing credits the
+      // beneficiary rather than transferring, and they withdraw separately.
+      expect(await escrowVault.pendingWithdrawal(beneficiary.address)).to.equal(
+        pledgeAmount
+      );
+
+      const beneficiaryBalanceBefore = await ethers.provider.getBalance(
+        beneficiary.address
+      );
+      const withdrawTx = await escrowVault.connect(beneficiary).withdraw();
+      const withdrawReceipt = await withdrawTx.wait();
+      const gasCost =
+        BigInt(withdrawReceipt!.gasUsed) * BigInt(withdrawReceipt!.gasPrice);
+
+      const beneficiaryBalanceAfter = await ethers.provider.getBalance(
+        beneficiary.address
+      );
+      expect(
+        beneficiaryBalanceAfter + gasCost - beneficiaryBalanceBefore
+      ).to.equal(pledgeAmount);
+      expect(await escrowVault.pendingWithdrawal(beneficiary.address)).to.equal(0n);
     });
 
     it("should refund pledges on milestone failure", async function () {
@@ -193,9 +211,6 @@ describe("Pledge Protocol Integration", function () {
       ) as any;
       const pledgeId = pledgeEvent.args[0];
 
-      // Get backer balance before
-      const backerBalanceBefore = await ethers.provider.getBalance(backer1.address);
-
       // Resolve pledge (milestone failed - full refund)
       await pledgeManager.resolvePledge(pledgeId, 0, pledgeAmount);
 
@@ -204,9 +219,21 @@ describe("Pledge Protocol Integration", function () {
       expect(pledge.status).to.equal(1); // Resolved
       expect(pledge.finalAmount).to.equal(0n);
 
-      // Verify funds refunded to backer
+      // Refunds are credited for withdrawal, not transferred directly.
+      expect(await escrowVault.pendingWithdrawal(backer1.address)).to.equal(
+        pledgeAmount
+      );
+
+      const backerBalanceBefore = await ethers.provider.getBalance(backer1.address);
+      const withdrawTx = await escrowVault.connect(backer1).withdraw();
+      const withdrawReceipt = await withdrawTx.wait();
+      const gasCost =
+        BigInt(withdrawReceipt!.gasUsed) * BigInt(withdrawReceipt!.gasPrice);
+
       const backerBalanceAfter = await ethers.provider.getBalance(backer1.address);
-      expect(backerBalanceAfter - backerBalanceBefore).to.equal(pledgeAmount);
+      expect(backerBalanceAfter + gasCost - backerBalanceBefore).to.equal(
+        pledgeAmount
+      );
     });
 
     it("should resolve all pledges for a campaign", async function () {
@@ -228,9 +255,6 @@ describe("Pledge Protocol Integration", function () {
         { value: pledge2Amount }
       );
 
-      // Get beneficiary balance before
-      const beneficiaryBalanceBefore = await ethers.provider.getBalance(beneficiary.address);
-
       // Resolve all pledges (milestone completed)
       await pledgeManager.resolveAllPledges(campaignId, true);
 
@@ -240,11 +264,25 @@ describe("Pledge Protocol Integration", function () {
       expect(campaign.totalReleased).to.equal(pledge1Amount + pledge2Amount);
       expect(campaign.totalRefunded).to.equal(0n);
 
-      // Verify funds released to beneficiary
-      const beneficiaryBalanceAfter = await ethers.provider.getBalance(beneficiary.address);
-      expect(beneficiaryBalanceAfter - beneficiaryBalanceBefore).to.equal(
+      // Both releases accumulate into a single pending withdrawal.
+      expect(await escrowVault.pendingWithdrawal(beneficiary.address)).to.equal(
         pledge1Amount + pledge2Amount
       );
+
+      const beneficiaryBalanceBefore = await ethers.provider.getBalance(
+        beneficiary.address
+      );
+      const withdrawTx = await escrowVault.connect(beneficiary).withdraw();
+      const withdrawReceipt = await withdrawTx.wait();
+      const gasCost =
+        BigInt(withdrawReceipt!.gasUsed) * BigInt(withdrawReceipt!.gasPrice);
+
+      const beneficiaryBalanceAfter = await ethers.provider.getBalance(
+        beneficiary.address
+      );
+      expect(
+        beneficiaryBalanceAfter + gasCost - beneficiaryBalanceBefore
+      ).to.equal(pledge1Amount + pledge2Amount);
     });
 
     it("should allow backer to cancel pledge during pledge window", async function () {
@@ -263,21 +301,28 @@ describe("Pledge Protocol Integration", function () {
       ) as any;
       const pledgeId = pledgeEvent.args[0];
 
-      // Get backer balance before
-      const backerBalanceBefore = await ethers.provider.getBalance(backer1.address);
-
       // Cancel pledge
-      const cancelTx = await pledgeManager.connect(backer1).cancelPledge(pledgeId);
-      const cancelReceipt = await cancelTx.wait();
-      const gasCost = cancelReceipt!.gasUsed * cancelReceipt!.gasPrice;
+      await pledgeManager.connect(backer1).cancelPledge(pledgeId);
 
       // Verify pledge status
       const pledge = await pledgeManager.getPledge(pledgeId);
       expect(pledge.status).to.equal(3); // Cancelled
 
-      // Verify funds refunded to backer (minus gas)
+      // Cancelling credits the refund for withdrawal rather than transferring.
+      expect(await escrowVault.pendingWithdrawal(backer1.address)).to.equal(
+        pledgeAmount
+      );
+
+      const backerBalanceBefore = await ethers.provider.getBalance(backer1.address);
+      const withdrawTx = await escrowVault.connect(backer1).withdraw();
+      const withdrawReceipt = await withdrawTx.wait();
+      const gasCost =
+        BigInt(withdrawReceipt!.gasUsed) * BigInt(withdrawReceipt!.gasPrice);
+
       const backerBalanceAfter = await ethers.provider.getBalance(backer1.address);
-      expect(backerBalanceAfter + gasCost - backerBalanceBefore).to.equal(pledgeAmount);
+      expect(backerBalanceAfter + gasCost - backerBalanceBefore).to.equal(
+        pledgeAmount
+      );
     });
 
     it("should reject pledge below minimum", async function () {

@@ -8,6 +8,7 @@
 import { randomUUID } from "crypto";
 import {
   PaymentProvider,
+  PaymentCurrency,
   PaymentConfig,
   PaymentProviderInterface,
   CreateCheckoutRequest,
@@ -61,6 +62,7 @@ export class PaymentProcessor {
     fees: bigint;
     byProvider: Map<PaymentProvider, { count: number; volume: bigint }>;
     byMethod: Map<string, { count: number; volume: bigint }>;
+    byCurrency: Map<PaymentCurrency, bigint>;
   };
 
   constructor(config: PaymentProcessorConfig) {
@@ -86,6 +88,7 @@ export class PaymentProcessor {
       fees: BigInt(0),
       byProvider: new Map(),
       byMethod: new Map(),
+      byCurrency: new Map(),
     };
   }
 
@@ -499,6 +502,12 @@ export class PaymentProcessor {
       methodStats.volume += amount;
       this.analytics.byMethod.set(session.method, methodStats);
     }
+
+    // By currency
+    this.analytics.byCurrency.set(
+      session.currency,
+      (this.analytics.byCurrency.get(session.currency) || BigInt(0)) + amount
+    );
   }
 
   getAnalytics(
@@ -521,6 +530,15 @@ export class PaymentProcessor {
       transactionsByMethod[method] = stats.count;
     }
 
+    const volumeByCurrency: Record<PaymentCurrency, string> = {} as Record<
+      PaymentCurrency,
+      string
+    >;
+
+    for (const [currency, volume] of this.analytics.byCurrency.entries()) {
+      volumeByCurrency[currency] = volume.toString();
+    }
+
     return {
       totalVolume: this.analytics.volume.toString(),
       totalTransactions: this.analytics.transactions,
@@ -532,7 +550,7 @@ export class PaymentProcessor {
       transactionsByProvider,
       volumeByMethod,
       transactionsByMethod,
-      volumeByCurrency: { USD: this.analytics.volume.toString() },
+      volumeByCurrency,
       successRate: 100, // Simplified
       failureRate: 0,
       refundRate: 0,

@@ -915,9 +915,13 @@ describe("AdvancedCampaignService", () => {
         schedule: { startDate: Date.now() - 86400000 },
       });
 
+      // The start date is in the past and auto-create is on by default, so
+      // instance 1 was already created by createRecurringCampaign.
+      expect(recurring.instances.length).toBe(1);
+
       const instance = service.createNextInstance(recurring.id);
       expect(instance.recurringCampaignId).toBe(recurring.id);
-      expect(instance.instanceNumber).toBe(1);
+      expect(instance.instanceNumber).toBe(2);
     });
   });
 
