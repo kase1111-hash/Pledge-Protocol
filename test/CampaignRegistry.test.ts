@@ -1,11 +1,12 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
 import { time } from "@nomicfoundation/hardhat-network-helpers";
-import { CampaignRegistry } from "../typechain-types";
+// Aliased because the local factory const below shadows this name.
+import type { CampaignRegistry as CampaignRegistryContract } from "../typechain-types";
 import { SignerWithAddress } from "@nomicfoundation/hardhat-ethers/signers";
 
 describe("CampaignRegistry", function () {
-  let campaignRegistry: CampaignRegistry;
+  let campaignRegistry: CampaignRegistryContract;
   let owner: SignerWithAddress;
   let creator: SignerWithAddress;
   let beneficiary: SignerWithAddress;
@@ -18,7 +19,7 @@ describe("CampaignRegistry", function () {
     [owner, creator, beneficiary, other] = await ethers.getSigners();
 
     const CampaignRegistry = await ethers.getContractFactory("CampaignRegistry");
-    campaignRegistry = await CampaignRegistry.deploy();
+    campaignRegistry = (await CampaignRegistry.deploy()) as unknown as CampaignRegistryContract;
     await campaignRegistry.waitForDeployment();
   });
 

@@ -157,6 +157,8 @@ export interface AuthContext {
     chainId?: number;
     userAgent?: string;
     ipAddress?: string;
+    /** Set when the request authenticated via an API key rather than a wallet */
+    apiKeyId?: string;
   };
 }
 

@@ -533,8 +533,9 @@ export class AuthService {
       events = events.filter((e) => e.severity === options.severity);
     }
 
-    if (options?.since) {
-      events = events.filter((e) => e.timestamp >= options.since);
+    if (options?.since !== undefined) {
+      const since = options.since;
+      events = events.filter((e) => e.timestamp >= since);
     }
 
     const limit = options?.limit || 100;

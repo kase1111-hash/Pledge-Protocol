@@ -6,7 +6,13 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { disputeService } from "../../governance";
-import { DisputeCategory, DisputeStatus, VoteOption } from "../../governance/types";
+import {
+  DisputeCategory,
+  DisputeFilterOptions,
+  DisputeStatus,
+  ResolutionTier,
+  VoteOption,
+} from "../../governance/types";
 import { authMiddleware } from "../../security/middleware";
 
 const router = Router();
@@ -93,17 +99,52 @@ const OpenVotingSchema = z.object({
 /**
  * Filter query schema
  */
+const DISPUTE_STATUSES = [
+  "pending",
+  "reviewing",
+  "voting",
+  "escalated",
+  "resolved",
+  "appealed",
+  "closed",
+] as const;
+
+const RESOLUTION_TIERS = ["automated", "community", "creator", "council"] as const;
+
 const FilterQuerySchema = z.object({
   campaignId: z.string().optional(),
-  status: z.string().optional(), // Can be comma-separated
-  category: z.string().optional(),
-  tier: z.string().optional(),
+  // Comma-separated list of DisputeStatus values
+  status: z
+    .string()
+    .optional()
+    .refine(
+      (value) =>
+        value === undefined ||
+        value
+          .split(",")
+          .every((s) =>
+            (DISPUTE_STATUSES as readonly string[]).includes(s.trim())
+          ),
+      { message: `status must be one or more of: ${DISPUTE_STATUSES.join(", ")}` }
+    ),
+  category: z
+    .enum([
+      "oracle_disagreement",
+      "oracle_failure",
+      "milestone_dispute",
+      "calculation_error",
+      "fraud_claim",
+      "technical_issue",
+      "other",
+    ])
+    .optional(),
+  tier: z.enum(RESOLUTION_TIERS).optional(),
   raisedBy: z.string().optional(),
   affectsAddress: z.string().optional(),
-  priority: z.string().optional(),
+  priority: z.enum(["low", "medium", "high", "critical"]).optional(),
   votingActive: z.string().optional(),
-  fromDate: z.string().optional(),
-  toDate: z.string().optional(),
+  fromDate: z.coerce.number().int().optional(),
+  toDate: z.coerce.number().int().optional(),
 });
 
 /**
@@ -157,21 +198,12 @@ router.get("/", (req: Request, res: Response) => {
   try {
     const query = FilterQuerySchema.parse(req.query);
 
-    const filters: {
-      campaignId?: string;
-      status?: string | string[];
-      category?: string;
-      tier?: string;
-      raisedBy?: string;
-      affectsAddress?: string;
-      priority?: string;
-      votingActive?: boolean;
-      fromDate?: number;
-      toDate?: number;
-    } = {};
+    const filters: DisputeFilterOptions = {};
     if (query.campaignId) filters.campaignId = query.campaignId;
     if (query.status) {
-      const statuses = query.status.split(",").map((s) => s.trim());
+      const statuses = query.status
+        .split(",")
+        .map((s) => s.trim() as DisputeStatus);
       filters.status = statuses.length === 1 ? statuses[0] : statuses;
     }
     if (query.category) filters.category = query.category;
@@ -180,8 +212,8 @@ router.get("/", (req: Request, res: Response) => {
     if (query.affectsAddress) filters.affectsAddress = query.affectsAddress;
     if (query.priority) filters.priority = query.priority;
     if (query.votingActive) filters.votingActive = query.votingActive === "true";
-    if (query.fromDate) filters.fromDate = parseInt(query.fromDate);
-    if (query.toDate) filters.toDate = parseInt(query.toDate);
+    if (query.fromDate) filters.fromDate = query.fromDate;
+    if (query.toDate) filters.toDate = query.toDate;
 
     const disputes = disputeService.listDisputes(filters);
 
@@ -535,14 +567,20 @@ router.post("/:disputeId/resolve", authMiddleware(), async (req: Request, res: R
       return;
     }
 
-    // Determine tier based on who is resolving (could check admin status)
-    const decidedBy = req.headers["x-resolution-tier"] as string || "council";
+    // Determine tier based on who is resolving (could check admin status).
+    // Unknown/absent header values fall back to the council tier.
+    const tierHeader = req.headers["x-resolution-tier"] as string | undefined;
+    const decidedBy: ResolutionTier = (RESOLUTION_TIERS as readonly string[]).includes(
+      tierHeader ?? ""
+    )
+      ? (tierHeader as ResolutionTier)
+      : "council";
 
     const dispute = await disputeService.resolve(disputeId, {
       outcome: parsed.data.outcome,
       releasePercent: parsed.data.releasePercent,
       refundPercent: parsed.data.refundPercent,
-      decidedBy: decidedBy as "auto" | "voting" | "council" | "admin",
+      decidedBy,
       rationale: parsed.data.rationale,
       evidenceIds: parsed.data.evidenceIds || [],
     });

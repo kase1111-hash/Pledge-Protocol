@@ -18,10 +18,14 @@ const router = Router();
 // VALIDATION SCHEMAS
 // ============================================================================
 
+// Amounts are integers in the currency's smallest unit (cents for USD) and are
+// carried as strings past this boundary so they never round-trip as floats.
+const MinorUnitAmount = z.number().int().positive().transform(String);
+
 const CheckoutSchema = z.object({
   campaignId: z.string().min(1),
   backerAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address"),
-  amount: z.number().positive(),
+  amount: MinorUnitAmount,
   currency: z.enum(["USD", "EUR", "GBP"]).default("USD"),
   method: z.enum(["card", "ach", "wire", "apple_pay", "google_pay"]).optional(),
   provider: z.enum(["stripe", "circle", "moonpay"]).optional(),
@@ -33,23 +37,30 @@ const CheckoutSchema = z.object({
 const RefundSchema = z.object({
   sessionId: z.string().optional(),
   pledgeId: z.string().optional(),
-  amount: z.number().positive().optional(),
-  reason: z.enum(["campaign_cancelled", "milestone_failed", "backer_request", "duplicate", "fraudulent", "other"]),
+  amount: MinorUnitAmount.optional(),
+  reason: z.enum([
+    "requested_by_customer",
+    "duplicate",
+    "fraudulent",
+    "campaign_cancelled",
+    "milestone_failed",
+    "dispute_resolved",
+  ]),
   description: z.string().max(500).optional(),
 });
 
 const SubscriptionSchema = z.object({
   campaignId: z.string().min(1),
   backerAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address"),
-  amount: z.number().positive(),
+  amount: MinorUnitAmount,
   currency: z.enum(["USD", "EUR", "GBP"]).default("USD"),
-  interval: z.enum(["daily", "weekly", "monthly", "yearly"]),
+  interval: z.enum(["weekly", "monthly", "quarterly", "yearly"]),
   metadata: z.record(z.any()).optional(),
 });
 
 const KycSchema = z.object({
   userAddress: z.string().regex(/^0x[a-fA-F0-9]{40}$/, "Invalid Ethereum address"),
-  provider: z.enum(["persona", "jumio", "sumsub"]).optional(),
+  provider: z.enum(["moonpay", "circle"]).optional(),
   level: z.enum(["basic", "standard", "enhanced"]).optional(),
   returnUrl: z.string().url(),
 });

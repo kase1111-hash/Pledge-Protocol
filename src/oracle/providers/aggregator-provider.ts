@@ -1,10 +1,16 @@
 import { BaseOracleProvider, IOracleProvider } from "../base-provider";
-import { OracleConfig, OracleResponse, MilestoneCondition, VerificationResult } from "../types";
+import {
+  OracleConfig,
+  OracleResponse,
+  MilestoneCondition,
+  VerificationResult,
+  AggregationMethod,
+} from "../types";
 
 /**
  * Aggregation methods for multi-source verification
  */
-export type AggregationMethod = "all" | "majority" | "any" | "weighted" | "threshold";
+export type { AggregationMethod };
 
 /**
  * Source weight configuration

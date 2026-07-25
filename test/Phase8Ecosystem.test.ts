@@ -265,20 +265,20 @@ describe("Phase 8: Ecosystem Expansion", () => {
       deploymentService = new DeploymentService();
     });
 
-    it("should estimate deployment gas", async () => {
-      const estimate = await deploymentService.estimateDeploymentGas(137, {
-        name: "Test Campaign",
-        description: "Test",
-        beneficiary: "0x1234567890123456789012345678901234567890",
-        goalAmount: BigInt("1000000000000000000"),
-        deadline: Date.now() + 86400000,
-        milestones: [{ name: "M1", targetDate: Date.now(), oracleId: "oracle-1" }],
-      });
-
-      expect(estimate).toBeDefined();
-      expect(estimate.chainId).toBe(137);
-      expect(estimate.gasLimit).toBeGreaterThan(BigInt(0));
-      expect(estimate.nativeCurrency).toBe("MATIC");
+    // estimateDeploymentGas queries a live RPC endpoint for fee data, so the
+    // value it returns cannot be asserted without a configured network. What
+    // is testable here is that it refuses to guess when no RPC is configured.
+    it("should require a configured RPC provider to estimate deployment gas", async () => {
+      await expect(
+        deploymentService.estimateDeploymentGas(137, {
+          name: "Test Campaign",
+          description: "Test",
+          beneficiary: "0x1234567890123456789012345678901234567890",
+          goalAmount: BigInt("1000000000000000000"),
+          deadline: Date.now() + 86400000,
+          milestones: [{ name: "M1", targetDate: Date.now(), oracleId: "oracle-1" }],
+        })
+      ).rejects.toThrow("No RPC provider configured for chain 137");
     });
 
     it("should get recommended chains", () => {

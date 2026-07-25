@@ -1,6 +1,40 @@
 import { ApiOracleProvider } from "./api-provider";
 import { OracleConfig, OracleResponse, GitHubPRResult } from "../types";
 
+/** Subset of the GitHub pull request payload this provider relies on */
+interface GitHubPullResponse {
+  merged?: boolean;
+  mergeable_state?: string;
+  merged_at?: string | null;
+  number?: number;
+}
+
+/** Subset of the GitHub compare payload this provider relies on */
+interface GitHubCompareResponse {
+  status?: string;
+  ahead_by?: number;
+  behind_by?: number;
+}
+
+/** Subset of the GitHub workflow run payload this provider relies on */
+interface GitHubWorkflowRunResponse {
+  status?: string;
+  conclusion?: string | null;
+  id?: number;
+  name?: string;
+  head_sha?: string;
+}
+
+/** Subset of the GitHub release payload this provider relies on */
+interface GitHubReleaseResponse {
+  tag_name?: string;
+  name?: string | null;
+  published_at?: string | null;
+  prerelease?: boolean;
+  draft?: boolean;
+  html_url?: string;
+}
+
 /**
  * GitHub Oracle Provider
  * Verifies GitHub activity (PRs, commits, releases)
@@ -49,14 +83,14 @@ export class GitHubProvider extends ApiOracleProvider {
         };
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as GitHubPullResponse;
 
       const result: GitHubPRResult = {
         prMerged: data.merged === true,
         commitInMain: data.merged === true, // If merged, it's in the base branch
         testsPassing: data.mergeable_state === "clean",
         mergedAt: data.merged_at ? new Date(data.merged_at).getTime() : undefined,
-        prNumber: data.number,
+        prNumber: data.number ?? prNumber,
         repo: `${owner}/${repo}`,
       };
 
@@ -107,7 +141,7 @@ export class GitHubProvider extends ApiOracleProvider {
         };
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as GitHubCompareResponse;
 
       // If status is "behind" or "identical", commit is in the branch
       const inBranch = data.status === "behind" || data.status === "identical";
@@ -163,7 +197,7 @@ export class GitHubProvider extends ApiOracleProvider {
         };
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as GitHubWorkflowRunResponse;
 
       return {
         success: true,
@@ -217,14 +251,16 @@ export class GitHubProvider extends ApiOracleProvider {
         };
       }
 
-      const data = await response.json();
+      const data = (await response.json()) as GitHubReleaseResponse;
 
       return {
         success: true,
         data: {
           tagName: data.tag_name,
           name: data.name,
-          publishedAt: new Date(data.published_at).getTime(),
+          publishedAt: data.published_at
+            ? new Date(data.published_at).getTime()
+            : undefined,
           prerelease: data.prerelease,
           draft: data.draft,
           htmlUrl: data.html_url,

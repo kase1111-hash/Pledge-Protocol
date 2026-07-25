@@ -6,7 +6,7 @@
  * including request validation, authentication, and response formatting.
  */
 
-import { describe, it, beforeEach, afterEach } from "mocha";
+import { describe, it, beforeEach } from "vitest";
 import { expect } from "chai";
 
 // Mock HTTP client for testing (would use supertest in real tests)
@@ -30,6 +30,8 @@ const TEST_ADDRESS_2 = "0x0987654321098765432109876543210987654321";
  * Mock API client for testing
  * In production, this would be replaced with supertest against the actual server
  */
+const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
+
 class MockApiClient {
   private baseUrl = "http://localhost:3000/v1";
 
@@ -58,7 +60,10 @@ class MockApiClient {
     }
 
     if (req.path === "/auth/challenge" && req.method === "POST") {
-      if (!req.body?.address) {
+      if (
+        typeof req.body?.address !== "string" ||
+        !ADDRESS_PATTERN.test(req.body.address)
+      ) {
         return {
           status: 400,
           body: { success: false, error: "Invalid request" },
@@ -78,7 +83,12 @@ class MockApiClient {
     }
 
     if (req.path === "/payments/checkout" && req.method === "POST") {
-      if (!req.body?.campaignId || !req.body?.backerAddress || !req.body?.amount) {
+      if (
+        !req.body?.campaignId ||
+        typeof req.body?.backerAddress !== "string" ||
+        !ADDRESS_PATTERN.test(req.body.backerAddress) ||
+        !req.body?.amount
+      ) {
         return {
           status: 400,
           body: {

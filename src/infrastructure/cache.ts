@@ -12,6 +12,12 @@ interface CacheEntry<T> {
   createdAt: number;
   accessCount: number;
   lastAccessedAt: number;
+  /**
+   * Monotonic access sequence. `lastAccessedAt` only has millisecond
+   * resolution, so entries touched in the same millisecond tie and LRU
+   * eviction would fall back to insertion order and drop the wrong entry.
+   */
+  lastAccessSeq: number;
   tags: string[];
 }
 
@@ -45,6 +51,7 @@ export class MemoryCache {
   private cache: Map<string, CacheEntry<any>> = new Map();
   private maxSize: number;
   private defaultTtl: number;
+  private accessSeq = 0;
   private stats: CacheStats = {
     hits: 0,
     misses: 0,
@@ -84,6 +91,7 @@ export class MemoryCache {
     // Update access stats
     entry.accessCount++;
     entry.lastAccessedAt = Date.now();
+    entry.lastAccessSeq = ++this.accessSeq;
     this.stats.hits++;
     this.updateHitRate();
 
@@ -108,6 +116,7 @@ export class MemoryCache {
       createdAt: now,
       accessCount: 0,
       lastAccessedAt: now,
+      lastAccessSeq: ++this.accessSeq,
       tags: options?.tags || [],
     };
 
@@ -289,8 +298,8 @@ export class MemoryCache {
     let oldestAccess = Infinity;
 
     for (const [key, entry] of this.cache.entries()) {
-      if (entry.lastAccessedAt < oldestAccess) {
-        oldestAccess = entry.lastAccessedAt;
+      if (entry.lastAccessSeq < oldestAccess) {
+        oldestAccess = entry.lastAccessSeq;
         oldestKey = key;
       }
     }

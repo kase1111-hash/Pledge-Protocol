@@ -1,3 +1,4 @@
+import { describe, it, beforeEach, afterEach } from "vitest";
 import { expect } from "chai";
 import {
   OracleRouter,
@@ -189,9 +190,7 @@ describe("Oracle Router", function () {
   });
 
   describe("Subscriptions", function () {
-    it("should subscribe to oracle updates", function (done) {
-      this.timeout(5000);
-
+    it("should subscribe to oracle updates", async function () {
       router.registerProvider({
         id: "sub-test",
         name: "Subscription Test",
@@ -202,21 +201,25 @@ describe("Oracle Router", function () {
       });
 
       let callCount = 0;
-      const subId = router.subscribe(
-        "sub-test",
-        "campaign-1",
-        {},
-        (response) => {
-          callCount++;
-          if (callCount >= 1) {
-            router.unsubscribe(subId);
-            expect(callCount).to.be.gte(1);
-            done();
-          }
-        },
-        100 // Poll every 100ms for test
-      );
-    });
+      const received = new Promise<void>((resolve) => {
+        const subId = router.subscribe(
+          "sub-test",
+          "campaign-1",
+          {},
+          () => {
+            callCount++;
+            if (callCount >= 1) {
+              router.unsubscribe(subId);
+              resolve();
+            }
+          },
+          100 // Poll every 100ms for test
+        );
+      });
+
+      await received;
+      expect(callCount).to.be.gte(1);
+    }, 5000);
 
     it("should unsubscribe from updates", function () {
       router.registerProvider({

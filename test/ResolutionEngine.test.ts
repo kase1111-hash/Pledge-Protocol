@@ -1,3 +1,4 @@
+import { describe, it, beforeEach } from "vitest";
 import { expect } from "chai";
 import {
   ResolutionEngine,
@@ -180,9 +181,7 @@ describe("Resolution Engine", function () {
   });
 
   describe("Scheduled Resolution", function () {
-    it("should schedule resolution at deadline", function (done) {
-      this.timeout(3000);
-
+    it("should schedule resolution at deadline", async function () {
       const campaignId = "scheduled-campaign";
       const deadline = Math.floor(Date.now() / 1000) + 1; // 1 second from now
 
@@ -203,11 +202,9 @@ describe("Resolution Engine", function () {
 
       engine.scheduleResolution(campaignId, deadline);
 
-      setTimeout(() => {
-        expect(triggered).to.be.true;
-        done();
-      }, 2000);
-    });
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      expect(triggered).to.be.true;
+    }, 5000);
 
     it("should cancel scheduled resolution", function () {
       const campaignId = "cancel-campaign";
@@ -219,9 +216,7 @@ describe("Resolution Engine", function () {
       // No error means success
     });
 
-    it("should trigger immediately for past deadline", function (done) {
-      this.timeout(1000);
-
+    it("should trigger immediately for past deadline", async function () {
       const campaignId = "past-deadline-campaign";
       const pastDeadline = Math.floor(Date.now() / 1000) - 100;
 
@@ -233,18 +228,21 @@ describe("Resolution Engine", function () {
         resolutionDeadline: pastDeadline,
       });
 
-      engine.on("resolution:queued", (job) => {
-        if (job.campaignId === campaignId) {
-          done();
-        }
+      const queued = new Promise<void>((resolve) => {
+        engine.on("resolution:queued", (job) => {
+          if (job.campaignId === campaignId) {
+            resolve();
+          }
+        });
       });
 
       engine.scheduleResolution(campaignId, pastDeadline);
+      await queued;
     });
   });
 
   describe("Events", function () {
-    it("should emit resolution:queued event", function (done) {
+    it("should emit resolution:queued event", async function () {
       dataProvider.setCampaign("event-campaign", {
         id: "event-campaign",
         status: "active",
@@ -253,17 +251,15 @@ describe("Resolution Engine", function () {
         resolutionDeadline: Date.now() / 1000 + 86400,
       });
 
-      engine.on("resolution:queued", (job) => {
-        expect(job.campaignId).to.equal("event-campaign");
-        done();
+      const queued = new Promise<{ campaignId: string }>((resolve) => {
+        engine.on("resolution:queued", resolve);
       });
 
       engine.triggerResolution("event-campaign", "manual");
+      expect((await queued).campaignId).to.equal("event-campaign");
     });
 
-    it("should emit resolution:completed event", function (done) {
-      this.timeout(2000);
-
+    it("should emit resolution:completed event", async function () {
       dataProvider.setCampaign("complete-campaign", {
         id: "complete-campaign",
         status: "active",
@@ -272,24 +268,26 @@ describe("Resolution Engine", function () {
         resolutionDeadline: Date.now() / 1000 + 86400,
       });
 
-      engine.on("resolution:completed", (job) => {
-        expect(job.campaignId).to.equal("complete-campaign");
-        expect(job.status).to.equal("completed");
-        done();
-      });
+      const completed = new Promise<{ campaignId: string; status: string }>(
+        (resolve) => {
+          engine.on("resolution:completed", resolve);
+        }
+      );
 
       engine.triggerResolution("complete-campaign", "manual");
+
+      const job = await completed;
+      expect(job.campaignId).to.equal("complete-campaign");
+      expect(job.status).to.equal("completed");
     });
 
-    it("should emit resolution:failed event", function (done) {
-      this.timeout(2000);
-
-      engine.on("resolution:failed", (job) => {
-        expect(job.status).to.equal("failed");
-        done();
+    it("should emit resolution:failed event", async function () {
+      const failed = new Promise<{ status: string }>((resolve) => {
+        engine.on("resolution:failed", resolve);
       });
 
       engine.triggerResolution("non-existent-campaign", "manual");
+      expect((await failed).status).to.equal("failed");
     });
   });
 });
@@ -311,8 +309,6 @@ describe("Pledge Amount Calculation", function () {
   });
 
   it("should calculate flat pledge - full release on success", async function () {
-    this.timeout(2000);
-
     const campaignId = "flat-success";
 
     dataProvider.setCampaign(campaignId, {

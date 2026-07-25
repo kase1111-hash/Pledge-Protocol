@@ -7,6 +7,13 @@ export type OracleType = "attestation" | "api" | "aggregator";
 
 export type TrustLevel = "official" | "verified" | "community" | "custom";
 
+export type AggregationMethod =
+  | "all"
+  | "majority"
+  | "any"
+  | "weighted"
+  | "threshold";
+
 export interface OracleConfig {
   id: string;
   name: string;
@@ -39,7 +46,7 @@ export interface OracleConfig {
 
   // Aggregator specific
   sources?: string[];
-  aggregationMethod?: "all" | "majority" | "any";
+  aggregationMethod?: AggregationMethod;
 }
 
 export interface OracleQuery {

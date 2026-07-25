@@ -46,8 +46,17 @@ class MemoryRepository<T extends { id: string; createdAt: number }, F extends Qu
     if (filter?.orderBy) {
       const dir = filter.orderDir === "desc" ? -1 : 1;
       results.sort((a, b) => {
-        const aVal = (a as Record<string, unknown>)[filter.orderBy!];
-        const bVal = (b as Record<string, unknown>)[filter.orderBy!];
+        const aVal = (a as Record<string, unknown>)[filter.orderBy!] as
+          | string
+          | number
+          | undefined;
+        const bVal = (b as Record<string, unknown>)[filter.orderBy!] as
+          | string
+          | number
+          | undefined;
+        if (aVal === bVal) return 0;
+        if (aVal === undefined) return 1;
+        if (bVal === undefined) return -1;
         if (aVal < bVal) return -1 * dir;
         if (aVal > bVal) return 1 * dir;
         return 0;

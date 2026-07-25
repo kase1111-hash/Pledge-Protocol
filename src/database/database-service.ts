@@ -161,7 +161,7 @@ export function getDatabase(): IDatabaseService {
 export const db: IDatabaseService = new Proxy({} as IDatabaseService, {
   get(_target, prop) {
     const database = getDatabase();
-    return (database as Record<string, unknown>)[prop as string];
+    return (database as unknown as Record<string, unknown>)[prop as string];
   },
 });
 

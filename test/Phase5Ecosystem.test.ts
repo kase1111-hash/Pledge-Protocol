@@ -3,7 +3,7 @@
  * Tests for oracle providers, aggregator, and template system
  */
 
-import { describe, it, expect, beforeEach } from "@jest/globals";
+import { describe, it, expect, beforeEach } from "vitest";
 
 // ============================================================================
 // STRAVA PROVIDER TESTS

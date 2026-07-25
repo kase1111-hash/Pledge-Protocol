@@ -121,7 +121,11 @@ export class StravaProvider extends ApiOracleProvider {
       throw new Error(`Failed to refresh Strava token: ${response.statusText}`);
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as {
+      access_token: string;
+      refresh_token: string;
+      expires_at: number;
+    };
     this.token = {
       accessToken: data.access_token,
       refreshToken: data.refresh_token,
@@ -222,7 +226,7 @@ export class StravaProvider extends ApiOracleProvider {
         };
       }
 
-      const rawData = await response.json();
+      const rawData = (await response.json()) as any[];
       const mappedActivities = rawData.map((activity: any) => {
         const mapped = this.mapResponse(activity);
         mapped.distanceMiles = mapped.distanceMeters / 1609.34;

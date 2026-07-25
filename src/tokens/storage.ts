@@ -136,7 +136,7 @@ export class StorageService {
       throw new Error(`IPFS upload failed: ${error}`);
     }
 
-    const result = await response.json();
+    const result = (await response.json()) as { IpfsHash: string };
     const hash = result.IpfsHash;
 
     return {
@@ -178,7 +178,7 @@ export class StorageService {
       throw new Error(`Arweave upload failed: ${error}`);
     }
 
-    const result = await response.json();
+    const result = (await response.json()) as { id: string };
     const txId = result.id;
 
     return {

@@ -39,6 +39,8 @@ export class Sandbox {
   private config: SandboxConfig;
   private state: SandboxState;
   private mockOracleResponses: Map<string, any> = new Map();
+  /** Milliseconds the sandbox clock is ahead of wall time, via advanceTime() */
+  private timeOffset = 0;
 
   constructor(config: Partial<SandboxConfig> = {}) {
     this.config = { ...DEFAULT_SANDBOX_CONFIG, ...config };
@@ -97,6 +99,7 @@ export class Sandbox {
 
   async reset(): Promise<SandboxState> {
     this.state = this.initializeState();
+    this.timeOffset = 0;
     return this.start();
   }
 
@@ -498,7 +501,9 @@ export class Sandbox {
 
   private mineBlock(): void {
     this.state.blockNumber++;
-    this.state.timestamp = Date.now();
+    // Honour any advanceTime() offset — snapping to Date.now() here would
+    // silently undo time travel.
+    this.state.timestamp = Date.now() + this.timeOffset;
   }
 
   private startAutoMining(): void {
@@ -518,7 +523,7 @@ export class Sandbox {
   }
 
   advanceTime(seconds: number): void {
-    this.state.timestamp += seconds * 1000;
+    this.timeOffset += seconds * 1000;
     this.mineBlock();
   }
 
