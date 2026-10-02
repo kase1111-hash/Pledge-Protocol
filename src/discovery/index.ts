@@ -17,3 +17,11 @@ export {
   TrendingCampaign,
   SimilarCampaign,
 } from "./search-service";
+
+export {
+  buildIndexEntries,
+  indexEntriesFor,
+  invalidateSearchIndex,
+  rebuildSearchIndex,
+  ensureSearchIndexFresh,
+} from "./campaign-index";

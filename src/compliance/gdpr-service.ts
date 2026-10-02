@@ -6,6 +6,7 @@
  */
 
 import { randomUUID } from "crypto";
+import { toCsv, xmlEscape } from "../reporting/file-formats";
 import {
   DataExportRequest,
   ExportFormat,
@@ -49,12 +50,16 @@ export class GdprService {
   private gdprRequests: Map<string, GdprRequest> = new Map();
   private ccpaRequests: Map<string, CcpaRequest> = new Map();
 
-  // Mock data stores (in production, these would be real database queries)
-  private userData: Map<string, any> = new Map();
+  /** Generated export files by request ID, served by the download endpoint */
+  private exportFiles: Map<string, string> = new Map();
   private retentionSchedule: RetentionSchedule;
   private policyVersion = "2.0.0";
 
-  constructor() {
+  /**
+   * @param userData Where a user's data lives. Without one, exports contain
+   *   only what this service holds (consents) and erasure touches nothing.
+   */
+  constructor(private userData: UserDataProvider = NO_USER_DATA) {
     this.retentionSchedule = this.initRetentionSchedule();
   }
 
@@ -109,7 +114,6 @@ export class GdprService {
     request.progress = 10;
 
     try {
-      // Collect data for each category
       const exportedData: ExportedData = {
         exportId: requestId,
         userAddress: request.userAddress,
@@ -123,64 +127,23 @@ export class GdprService {
       let processed = 0;
 
       for (const category of request.includeCategories) {
-        switch (category) {
-          case "profile":
-            exportedData.data.profile = await this.exportProfile(
-              request.userAddress
-            );
-            break;
-          case "campaigns":
-            exportedData.data.campaigns = await this.exportCampaigns(
-              request.userAddress
-            );
-            break;
-          case "pledges":
-            exportedData.data.pledges = await this.exportPledges(
-              request.userAddress
-            );
-            break;
-          case "transactions":
-            exportedData.data.transactions = await this.exportTransactions(
-              request.userAddress
-            );
-            break;
-          case "commemoratives":
-            exportedData.data.commemoratives = await this.exportCommemoratives(
-              request.userAddress
-            );
-            break;
-          case "social":
-            exportedData.data.social = await this.exportSocial(
-              request.userAddress
-            );
-            break;
-          case "preferences":
-            exportedData.data.preferences = await this.exportPreferences(
-              request.userAddress
-            );
-            break;
-          case "audit_log":
-            exportedData.data.auditLog = await this.exportAuditLog(
-              request.userAddress
-            );
-            break;
-        }
+        const value = await this.userData.exportCategory(request.userAddress, category);
+        (exportedData.data as Record<string, unknown>)[EXPORT_KEYS[category]] = value;
 
         processed++;
         request.progress = 10 + Math.round((processed / categoryCount) * 80);
       }
 
-      // Generate download file
-      const content = this.formatExport(exportedData, request.format);
-      const fileSizeBytes = Buffer.byteLength(content, "utf8");
+      // Consent decisions are always part of a subject access export
+      (exportedData.data as Record<string, unknown>).consents = this.getConsentHistory(request.userAddress);
 
-      // In production: upload to secure storage (S3, etc.)
-      const downloadUrl = `https://storage.pledgeprotocol.io/exports/${requestId}.${request.format}`;
+      const content = this.formatExport(exportedData, request.format);
+      this.exportFiles.set(requestId, content);
 
       request.status = "completed";
       request.progress = 100;
-      request.downloadUrl = downloadUrl;
-      request.fileSizeBytes = fileSizeBytes;
+      request.downloadUrl = `/v1/compliance/export/${requestId}/download`;
+      request.fileSizeBytes = Buffer.byteLength(content, "utf8");
       request.expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000; // 7 days
       request.completedAt = Date.now();
     } catch (error) {
@@ -188,134 +151,38 @@ export class GdprService {
     }
   }
 
-  // Export helpers
-  private async exportProfile(address: string): Promise<UserProfileData> {
-    return {
-      address,
-      displayName: "User",
-      email: "user@example.com",
-      bio: "Protocol user",
-      createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
-      lastActiveAt: Date.now(),
-      roles: ["backer"],
-      verificationStatus: "verified",
-    };
-  }
-
-  private async exportCampaigns(address: string): Promise<CampaignData[]> {
-    return [
-      {
-        id: "campaign_1",
-        name: "Sample Campaign",
-        description: "A sample campaign",
-        beneficiary: "0x...",
-        createdAt: Date.now() - 7 * 24 * 60 * 60 * 1000,
-        status: "active",
-        totalPledged: "1000000000000000000",
-        backerCount: 10,
-      },
-    ];
-  }
-
-  private async exportPledges(address: string): Promise<PledgeData[]> {
-    return [
-      {
-        id: "pledge_1",
-        campaignId: "campaign_1",
-        campaignName: "Sample Campaign",
-        amount: "100000000000000000",
-        status: "active",
-        createdAt: Date.now() - 5 * 24 * 60 * 60 * 1000,
-      },
-    ];
-  }
-
-  private async exportTransactions(address: string): Promise<TransactionData[]> {
-    return [
-      {
-        id: "tx_1",
-        type: "payment",
-        amount: "100000000000000000",
-        currency: "USD",
-        provider: "stripe",
-        status: "succeeded",
-        createdAt: Date.now() - 5 * 24 * 60 * 60 * 1000,
-      },
-    ];
-  }
-
-  private async exportCommemoratives(
-    address: string
-  ): Promise<CommemorativeData[]> {
-    return [];
-  }
-
-  private async exportSocial(address: string): Promise<SocialData> {
-    return {
-      followers: [],
-      following: [],
-      comments: [],
-      activity: [],
-    };
-  }
-
-  private async exportPreferences(address: string): Promise<PreferencesData> {
-    return {
-      publicProfile: true,
-      showPledgeAmounts: true,
-      emailNotifications: true,
-      marketingEmails: false,
-      language: "en",
-      timezone: "UTC",
-    };
-  }
-
-  private async exportAuditLog(address: string): Promise<AuditLogEntry[]> {
-    return [
-      {
-        action: "login",
-        timestamp: Date.now() - 1000,
-        ipAddress: "127.0.0.1",
-      },
-    ];
+  /**
+   * The generated export file, until it expires
+   */
+  downloadExport(requestId: string): { content: string; format: ExportFormat } | null {
+    const request = this.exportRequests.get(requestId);
+    const content = this.exportFiles.get(requestId);
+    if (!request || request.status !== "completed" || content === undefined) {
+      return null;
+    }
+    if (request.expiresAt && Date.now() > request.expiresAt) {
+      this.exportFiles.delete(requestId);
+      request.status = "expired";
+      return null;
+    }
+    request.downloadedAt = Date.now();
+    return { content, format: request.format };
   }
 
   private formatExport(data: ExportedData, format: ExportFormat): string {
     switch (format) {
-      case "json":
-        return JSON.stringify(data, null, 2);
-
       case "csv":
-        // Simplified CSV for main entities
-        let csv = "";
-
-        if (data.data.pledges) {
-          csv += "PLEDGES\nid,campaignId,amount,status,createdAt\n";
-          for (const p of data.data.pledges) {
-            csv += `${p.id},${p.campaignId},${p.amount},${p.status},${p.createdAt}\n`;
-          }
-        }
-
-        if (data.data.transactions) {
-          csv += "\nTRANSACTIONS\nid,type,amount,currency,status,createdAt\n";
-          for (const t of data.data.transactions) {
-            csv += `${t.id},${t.type},${t.amount},${t.currency},${t.status},${t.createdAt}\n`;
-          }
-        }
-
-        return csv;
+        // One section per category
+        return Object.entries(data.data)
+          .map(([section, value]) => `${section.toUpperCase()}\n${toCsv(value ?? []).toString("utf8")}`)
+          .join("\n\n");
 
       case "xml":
-        return `<?xml version="1.0" encoding="UTF-8"?>
-<export>
-  <exportId>${data.exportId}</exportId>
-  <userAddress>${data.userAddress}</userAddress>
-  <exportedAt>${data.exportedAt}</exportedAt>
-  <data>${JSON.stringify(data.data)}</data>
-</export>`;
+        return `<?xml version="1.0" encoding="UTF-8"?>\n${toXml("export", data)}\n`;
 
+      case "json":
       default:
-        return JSON.stringify(data);
+        return JSON.stringify(data, (_key, value) => (typeof value === "bigint" ? value.toString() : value), 2);
     }
   }
 
@@ -405,8 +272,11 @@ export class GdprService {
     // underneath them.
     const confirmed: DataDeletionRequest = { ...request };
 
-    // Process immediately or wait for scheduled time
-    this.processDeletion(requestId);
+    // Erasure runs once the grace period ends (processDueDeletions), so the
+    // user can still cancel until then; past it, run now
+    if (!request.scheduledFor || request.scheduledFor <= Date.now()) {
+      this.processDeletion(requestId);
+    }
 
     return confirmed;
   }
@@ -425,54 +295,47 @@ export class GdprService {
     return request;
   }
 
+  /**
+   * Run every confirmed deletion whose grace period has ended. The server
+   * calls this periodically; returns the number started.
+   */
+  async processDueDeletions(now: number = Date.now()): Promise<number> {
+    const due = Array.from(this.deletionRequests.values()).filter(
+      (r) => r.status === "pending" && r.confirmedAt !== undefined && (r.scheduledFor ?? 0) <= now
+    );
+    for (const request of due) {
+      await this.processDeletion(request.id);
+    }
+    return due.length;
+  }
+
   private async processDeletion(requestId: string): Promise<void> {
     const request = this.deletionRequests.get(requestId);
-    if (!request) return;
+    if (!request || request.status !== "pending") return;
 
     request.status = "processing";
+    let retained = 0;
 
     try {
       const categoryCount = request.categories.length;
       let processed = 0;
 
       for (const category of request.categories) {
-        if (request.type === "full_delete") {
-          request.deletedRecords += await this.deleteCategory(
-            request.userAddress,
-            category
-          );
-        } else {
-          request.anonymizedRecords += await this.anonymizeCategory(
-            request.userAddress,
-            category
-          );
-        }
+        const result = await this.userData.eraseCategory(request.userAddress, category, request.type);
+        request.deletedRecords += result.deleted;
+        request.anonymizedRecords += result.anonymized;
+        retained += result.retained;
 
         processed++;
         request.progress = Math.round((processed / categoryCount) * 100);
       }
 
+      request.retainedRecords = retained;
       request.status = "completed";
       request.completedAt = Date.now();
     } catch (error) {
-      request.status = "pending"; // Retry later
+      request.status = "pending"; // Retry on the next processDueDeletions
     }
-  }
-
-  private async deleteCategory(
-    address: string,
-    category: DataCategory
-  ): Promise<number> {
-    // In production: actual database deletion
-    return Math.floor(Math.random() * 100);
-  }
-
-  private async anonymizeCategory(
-    address: string,
-    category: DataCategory
-  ): Promise<number> {
-    // In production: replace PII with anonymous identifiers
-    return Math.floor(Math.random() * 100);
   }
 
   getDeletionRequest(requestId: string): DataDeletionRequest | undefined {
@@ -810,6 +673,61 @@ export class GdprService {
 // EXPORTS
 // ============================================================================
 
-export function createGdprService(): GdprService {
-  return new GdprService();
+export function createGdprService(userData?: UserDataProvider): GdprService {
+  return new GdprService(userData);
+}
+
+// ============================================================================
+// USER DATA
+// ============================================================================
+
+/**
+ * Reads and erases a user's data wherever the platform keeps it
+ */
+export interface UserDataProvider {
+  exportCategory(address: string, category: DataCategory): Promise<unknown>;
+  /**
+   * Erase (or anonymize) a category. Records that must be kept, such as
+   * escrow and payment records, are counted as retained.
+   */
+  eraseCategory(
+    address: string,
+    category: DataCategory,
+    type: DeletionType
+  ): Promise<{ deleted: number; anonymized: number; retained: number }>;
+}
+
+/** For a standalone service: no user data beyond its own records */
+export const NO_USER_DATA: UserDataProvider = {
+  async exportCategory() {
+    return null;
+  },
+  async eraseCategory() {
+    return { deleted: 0, anonymized: 0, retained: 0 };
+  },
+};
+
+const EXPORT_KEYS: Record<DataCategory, string> = {
+  profile: "profile",
+  campaigns: "campaigns",
+  pledges: "pledges",
+  transactions: "transactions",
+  commemoratives: "commemoratives",
+  social: "social",
+  preferences: "preferences",
+  audit_log: "auditLog",
+  communications: "communications",
+};
+
+
+/** Element-per-field XML; array entries become <item> elements */
+function toXml(name: string, value: unknown): string {
+  const tag = /^[A-Za-z_][\w.-]*$/.test(name) ? name : "field";
+  if (value === null || value === undefined) return `<${tag}/>`;
+  if (Array.isArray(value)) return `<${tag}>${value.map((v) => toXml("item", v)).join("")}</${tag}>`;
+  if (value instanceof Map) return toXml(name, Object.fromEntries(value));
+  if (typeof value === "object") {
+    return `<${tag}>${Object.entries(value as Record<string, unknown>).map(([k, v]) => toXml(k, v)).join("")}</${tag}>`;
+  }
+  return `<${tag}>${xmlEscape(String(value))}</${tag}>`;
 }

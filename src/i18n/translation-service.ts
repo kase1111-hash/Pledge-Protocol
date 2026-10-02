@@ -961,6 +961,22 @@ export class TranslationService {
   // USER PREFERENCES
   // ==========================================================================
 
+  /** Stored locale preferences, without creating defaults */
+  exportUser(address: string): UserLocalePreferences | null {
+    const user = address.toLowerCase();
+    return Array.from(this.userPreferences.entries()).find(([a]) => a.toLowerCase() === user)?.[1] ?? null;
+  }
+
+  /** Delete a user's locale preferences; returns records removed */
+  eraseUser(address: string): number {
+    const user = address.toLowerCase();
+    let deleted = 0;
+    for (const key of Array.from(this.userPreferences.keys())) {
+      if (key.toLowerCase() === user && this.userPreferences.delete(key)) deleted++;
+    }
+    return deleted;
+  }
+
   getUserPreferences(address: string): UserLocalePreferences {
     let prefs = this.userPreferences.get(address);
     if (!prefs) {

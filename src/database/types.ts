@@ -168,6 +168,8 @@ export interface CampaignQuery {
   status?: CampaignStatus;
   visibility?: CampaignVisibility;
   creator?: string;
+  /** Campaigns paying out to this address */
+  beneficiary?: string;
   limit?: number;
   offset?: number;
 }

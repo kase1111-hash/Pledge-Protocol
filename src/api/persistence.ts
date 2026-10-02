@@ -100,7 +100,7 @@ export function registerPersistentState(): void {
     "consentRecords",
     "gdprRequests",
     "ccpaRequests",
-    "userData",
+    "exportFiles",
   ]);
 
   bindMaps("risk", fraudDetector, [

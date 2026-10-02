@@ -885,6 +885,47 @@ export class NotificationService {
   // ANALYTICS
   // ==========================================================================
 
+  // ==========================================================================
+  // PERSONAL DATA (GDPR)
+  // ==========================================================================
+
+  /** A user's preferences (including devices) and notifications */
+  exportUser(address: string): {
+    preferences: NotificationPreferences | null;
+    notifications: Notification[];
+    inApp: InAppNotification[];
+  } {
+    const user = address.toLowerCase();
+    return {
+      preferences: Array.from(this.preferences.entries()).find(([a]) => a.toLowerCase() === user)?.[1] ?? null,
+      notifications: Array.from(this.notifications.values()).filter(
+        (n) => n.recipientAddress.toLowerCase() === user
+      ),
+      inApp: Array.from(this.inAppNotifications.entries())
+        .filter(([a]) => a.toLowerCase() === user)
+        .flatMap(([, list]) => list),
+    };
+  }
+
+  /** Delete a user's preferences, devices and notifications; returns records removed */
+  eraseUser(address: string): number {
+    const user = address.toLowerCase();
+    let deleted = 0;
+    for (const key of Array.from(this.preferences.keys())) {
+      if (key.toLowerCase() === user && this.preferences.delete(key)) deleted++;
+    }
+    for (const [key, list] of Array.from(this.inAppNotifications.entries())) {
+      if (key.toLowerCase() === user) {
+        deleted += list.length;
+        this.inAppNotifications.delete(key);
+      }
+    }
+    for (const [id, notification] of Array.from(this.notifications.entries())) {
+      if (notification.recipientAddress.toLowerCase() === user && this.notifications.delete(id)) deleted++;
+    }
+    return deleted;
+  }
+
   getDeliveryStats(filters?: NotificationStatsQuery): NotificationStats {
     const startDate = filters?.startDate || Date.now() - 30 * 24 * 60 * 60 * 1000;
     const endDate = filters?.endDate || Date.now();

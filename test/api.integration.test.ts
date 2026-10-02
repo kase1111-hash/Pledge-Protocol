@@ -15,6 +15,8 @@ import app from "../src/api/app";
 import { initializeOracles } from "../src/api/routes/oracles";
 import { closeDatabase, setStore } from "../src/database";
 import { storeBackends } from "./helpers/stores";
+import { gdprService } from "../src/api/routes/compliance";
+import { getStore } from "../src/database";
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 const HOUR = 3600;
@@ -611,6 +613,60 @@ for (const backend of storeBackends("api_integration_test")) {
         expect((await as(sessions.backer).get("/v1/compliance/stats")).status).toBe(403);
       });
 
+      it("exports a user's real data and erases it after the grace period", async () => {
+        const subject = Wallet.createRandom();
+        const subjectSession = await login(subject);
+        const user = as(subjectSession);
+
+        const campaignId = await activeCampaign();
+        const pledged = await user.post("/v1/pledges", {
+          campaignId, pledgeTypeId: "pt_0", amount: "500", backerName: "Alice",
+        });
+        expect(pledged.status).toBe(201);
+        expect((await user.put(`/v1/i18n/preferences/${subject.address}`, { locale: "de" })).status).toBe(200);
+        expect((await user.put("/v1/social/users/me", { displayName: "Alice" })).status).toBe(200);
+
+        // Export: the user's actual pledge and preferences, downloadable
+        const requested = await user.post("/v1/compliance/export", { format: "json" });
+        let status = requested.body.status;
+        for (let i = 0; i < 50 && status !== "completed"; i++) {
+          await new Promise((r) => setTimeout(r, 10));
+          status = (await user.get(`/v1/compliance/export/${requested.body.requestId}`)).body.status;
+        }
+        expect(status).toBe("completed");
+
+        const download = await user.get(`/v1/compliance/export/${requested.body.requestId}/download`);
+        expect(download.status).toBe(200);
+        const exported = JSON.parse(download.text);
+        expect(exported.data.pledges.map((p: { id: string }) => p.id)).toContain(pledged.body.id);
+        expect(exported.data.preferences.locale.locale).toBe("de");
+        expect(exported.data.profile.profile.displayName).toBe("Alice");
+        expect((await as(sessions.stranger).get(`/v1/compliance/export/${requested.body.requestId}/download`)).status).toBe(404);
+
+        // Erasure waits out the grace period, then removes personal data and
+        // keeps the escrow record
+        const deletion = await user.post("/v1/compliance/delete", {
+          type: "anonymize",
+          categories: ["profile", "social", "preferences", "pledges"],
+        });
+        const confirmed = await user.post(`/v1/compliance/delete/${deletion.body.requestId}/confirm`, {
+          confirmationToken: deletion.body.confirmationToken,
+        });
+        expect(confirmed.status).toBe(200);
+        expect(gdprService.getDeletionRequest(deletion.body.requestId)!.status).toBe("pending");
+
+        await gdprService.processDueDeletions(Date.now() + 8 * 24 * 3600 * 1000);
+        const done = gdprService.getDeletionRequest(deletion.body.requestId)!;
+        expect(done.status).toBe("completed");
+        expect(done.deletedRecords).toBeGreaterThanOrEqual(2); // profile + locale preferences
+        expect(done.anonymizedRecords).toBe(1); // the pledge's display name
+        expect(done.retainedRecords).toBe(1); // the pledge itself
+
+        const pledge = await getStore().getPledge(pledged.body.id);
+        expect(pledge).toMatchObject({ backerName: null, escrowedAmount: "500" });
+        expect((await user.get(`/v1/i18n/preferences/${subject.address}`)).body.locale).not.toBe("de");
+      });
+
       it("limits organizations to their members and permissions", async () => {
         const created = await as(sessions.creator).post("/v1/enterprise/orgs", {
           name: `Org ${Date.now()}`,
@@ -698,6 +754,59 @@ for (const backend of storeBackends("api_integration_test")) {
 
         expect((await as(sessions.stranger).get(`/v1/analytics/backers/${backer.address}/portfolio`)).status).toBe(403);
         expect((await as(sessions.stranger).get(`/v1/i18n/preferences/${backer.address}`)).status).toBe(403);
+      });
+    });
+
+    describe("analytics and discovery", () => {
+      it("reflect stored campaigns and pledges", async () => {
+        const campaignId = await activeCampaign();
+        await pledge(campaignId, "500");
+        await pledge(campaignId, "300", sessions.backer2);
+
+        const search = await as(null).get("/v1/analytics/search?q=marathon&limit=100");
+        expect(search.status).toBe(200);
+        expect(search.body.data.campaigns.find((c: { id: string }) => c.id === campaignId)).toMatchObject({
+          totalPledged: "800",
+          backerCount: 2,
+          status: "active",
+        });
+
+        const trending = await as(null).get("/v1/analytics/platform/trending?limit=100");
+        const entry = trending.body.data.trending.find((t: { campaign: { id: string } }) => t.campaign.id === campaignId);
+        expect(entry.changePercent).toBe(100); // everything was pledged in the last day
+
+        expect((await as(sessions.stranger).get(`/v1/analytics/creators/${creator.address}/dashboard`)).status).toBe(403);
+        const dashboard = await as(sessions.creator).get(`/v1/analytics/creators/${creator.address}/dashboard`);
+        expect(dashboard.status).toBe(200);
+        expect(dashboard.body.data.recentCampaigns.map((c: { id: string }) => c.id)).toContain(campaignId);
+
+        const portfolio = await as(sessions.backer2).get(`/v1/analytics/backers/${backer2.address}/portfolio`);
+        expect(portfolio.status).toBe(200);
+        expect(portfolio.body.data.recentPledges[0]).toMatchObject({ campaignId, amount: "300", status: "active" });
+        expect(BigInt(portfolio.body.data.summary.pendingResolution)).toBeGreaterThanOrEqual(300n);
+      });
+
+      it("limits advanced campaign changes to the creator", async () => {
+        const campaignId = await activeCampaign();
+        await pledge(campaignId, "400");
+        const goal = { name: "Bonus", description: "", type: "amount", threshold: "300", reward: { type: "bonus", description: "" } };
+
+        expect((await as(sessions.stranger).post(`/v1/campaigns/advanced/${campaignId}/stretch-goals`, goal)).status).toBe(403);
+        expect((await as(sessions.creator).post(`/v1/campaigns/advanced/${campaignId}/stretch-goals`, goal)).status).toBe(201);
+
+        const progress = await as(null).get(`/v1/campaigns/advanced/${campaignId}/stretch-goals/progress`);
+        expect(progress.body).toMatchObject({ currentAmount: "400", currentBackers: 1 });
+        expect(progress.body.goals[0].status).toBe("achieved");
+
+        const action = { type: "close", scheduledFor: Date.now() + 1000 };
+        expect((await as(sessions.stranger).post(`/v1/campaigns/advanced/${campaignId}/schedule/action`, action)).status).toBe(403);
+        expect((await as(sessions.stranger).post("/v1/campaigns/advanced/schedule/process")).status).toBe(403);
+        expect((await as(sessions.creator).post(`/v1/campaigns/advanced/${campaignId}/schedule/action`, action)).status).toBe(201);
+
+        advance(2);
+        const processed = await as(sessions.admin).post("/v1/campaigns/advanced/schedule/process");
+        expect(processed.status).toBe(200);
+        expect((await as(null).get(`/v1/campaigns/${campaignId}`)).body.status).toBe("pledging_closed");
       });
     });
 

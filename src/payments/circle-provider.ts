@@ -174,6 +174,11 @@ export class CircleProvider implements PaymentProviderInterface {
     return entry.session;
   }
 
+  /** Checkout sessions created through this provider */
+  listCheckouts(): CheckoutSession[] {
+    return Array.from(this.sessionIndex.values(), (entry) => entry.session);
+  }
+
   async expireCheckout(sessionId: string): Promise<void> {
     const entry = this.sessionIndex.get(sessionId);
     if (!entry) return;

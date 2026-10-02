@@ -14,6 +14,9 @@ import { ipRateLimiter, userRateLimiter, endpointRateLimiter } from "../security
 import { logger } from "../security/audit-logger";
 import { initializeDatabase, closeDatabase } from "../database";
 import { restorePersistentState, flushPersistentState } from "./persistence";
+import { reportService } from "../reporting";
+import { gdprService } from "./routes/compliance";
+import { advancedCampaignService } from "../campaigns-advanced";
 
 const PORT = env.PORT;
 
@@ -52,6 +55,20 @@ initializeDatabase({
   await restorePersistentState();
   jobQueue.start();
 
+  // Scheduled reports and campaign actions whose time has come, and
+  // confirmed data deletions whose grace period has ended
+  const reportInterval = setInterval(() => {
+    reportService
+      .runDueScheduledReports()
+      .catch((err) => logger.error("Running scheduled reports failed", err));
+    gdprService
+      .processDueDeletions()
+      .catch((err) => logger.error("Processing data deletions failed", err));
+    advancedCampaignService
+      .processScheduledActions()
+      .catch((err) => logger.error("Running scheduled campaign actions failed", err));
+  }, 60_000);
+
   // Changes made outside a request (timers, background jobs) are stored here;
   // request handlers are flushed before they respond
   const flushInterval = setInterval(() => {
@@ -85,6 +102,7 @@ initializeDatabase({
     jobQueue.stop();
     resolutionEngine.shutdown();
     clearInterval(flushInterval);
+    clearInterval(reportInterval);
 
     // Stop accepting connections; once in-flight requests finish, store any
     // remaining changes and close the database

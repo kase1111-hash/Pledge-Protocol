@@ -196,6 +196,19 @@ export class PaymentProcessor {
     throw this.createError("processing_error", "Session not found");
   }
 
+  /**
+   * A backer's checkout sessions across providers, newest first
+   */
+  listCheckoutsForBacker(backerAddress: string): CheckoutSession[] {
+    const backer = backerAddress.toLowerCase();
+    const sessions: CheckoutSession[] = [];
+    for (const provider of this.providers.values()) {
+      const list = (provider as { listCheckouts?: () => CheckoutSession[] }).listCheckouts?.() ?? [];
+      sessions.push(...list.filter((s) => s.backerAddress.toLowerCase() === backer));
+    }
+    return sessions.sort((a, b) => b.createdAt - a.createdAt);
+  }
+
   async expireCheckout(
     sessionId: string,
     provider?: PaymentProvider

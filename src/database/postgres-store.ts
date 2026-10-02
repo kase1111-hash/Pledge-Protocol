@@ -125,6 +125,7 @@ class PostgresSession implements StoreSession {
     addFilter(where, values, "status", query.status);
     addFilter(where, values, "visibility", query.visibility);
     addFilter(where, values, "creator", query.creator?.toLowerCase());
+    addFilter(where, values, "lower(data->>'beneficiary')", query.beneficiary?.toLowerCase());
 
     const count = await this.db.query(
       `SELECT COUNT(*)::int AS total FROM campaign_records ${whereClause(where)}`,

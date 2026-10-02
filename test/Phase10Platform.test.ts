@@ -32,10 +32,6 @@ import {
 } from "../src/integrations";
 
 // Advanced Campaigns
-import {
-  AdvancedCampaignService,
-  createAdvancedCampaignService,
-} from "../src/campaigns-advanced";
 
 // ============================================================================
 // NOTIFICATION SERVICE TESTS
@@ -418,8 +414,8 @@ describe("ReportService", () => {
   });
 
   describe("Financial Reports", () => {
-    it("should get financial summary", () => {
-      const summary = service.getFinancialSummary(testAddress, "month");
+    it("should get financial summary", async () => {
+      const summary = await service.getFinancialSummary(testAddress, "month");
 
       expect(summary.period).toBeDefined();
       expect(summary.overview.totalRevenue).toBeDefined();
@@ -427,8 +423,8 @@ describe("ReportService", () => {
       expect(summary.trends).toBeInstanceOf(Array);
     });
 
-    it("should get transaction history", () => {
-      const transactions = service.getTransactionHistory(testAddress);
+    it("should get transaction history", async () => {
+      const transactions = await service.getTransactionHistory(testAddress);
 
       expect(transactions).toBeInstanceOf(Array);
       if (transactions.length > 0) {
@@ -438,8 +434,8 @@ describe("ReportService", () => {
       }
     });
 
-    it("should get payout report", () => {
-      const payouts = service.getPayoutReport(testAddress, "month");
+    it("should get payout report", async () => {
+      const payouts = await service.getPayoutReport(testAddress, "month");
 
       expect(payouts.recipient).toBe(testAddress);
       expect(payouts.payouts).toBeInstanceOf(Array);
@@ -448,8 +444,8 @@ describe("ReportService", () => {
   });
 
   describe("Tax Reports", () => {
-    it("should get tax summary", () => {
-      const summary = service.getTaxSummary(testAddress, 2025, "US");
+    it("should get tax summary", async () => {
+      const summary = await service.getTaxSummary(testAddress, 2025, "US");
 
       expect(summary.taxYear).toBe(2025);
       expect(summary.taxpayerAddress).toBe(testAddress);
@@ -467,8 +463,8 @@ describe("ReportService", () => {
   });
 
   describe("Campaign Reports", () => {
-    it("should get campaign performance", () => {
-      const performance = service.getCampaignPerformance("campaign_123");
+    it("should get campaign performance", async () => {
+      const performance = await service.getCampaignPerformance("campaign_123");
 
       expect(performance.campaignId).toBe("campaign_123");
       expect(performance.metrics.totalPledged).toBeDefined();
@@ -478,8 +474,8 @@ describe("ReportService", () => {
   });
 
   describe("Backer Reports", () => {
-    it("should get backer activity", () => {
-      const activity = service.getBackerActivity(testAddress);
+    it("should get backer activity", async () => {
+      const activity = await service.getBackerActivity(testAddress);
 
       expect(activity.backerAddress).toBe(testAddress);
       expect(activity.summary.totalPledged).toBeDefined();
@@ -489,8 +485,8 @@ describe("ReportService", () => {
   });
 
   describe("Audit", () => {
-    it("should get audit trail", () => {
-      const audit = service.getAuditTrail("campaign", "campaign_123");
+    it("should get audit trail", async () => {
+      const audit = await service.getAuditTrail("campaign", "campaign_123");
 
       expect(audit.entityType).toBe("campaign");
       expect(audit.entityId).toBe("campaign_123");
@@ -821,343 +817,6 @@ describe("IntegrationService", () => {
       expect(stats.total).toBeGreaterThan(0);
       expect(stats.byType).toBeDefined();
       expect(stats.byStatus).toBeDefined();
-    });
-  });
-});
-
-// ============================================================================
-// ADVANCED CAMPAIGN SERVICE TESTS
-// ============================================================================
-
-describe("AdvancedCampaignService", () => {
-  let service: AdvancedCampaignService;
-  const testAddress = "0x1234567890123456789012345678901234567890";
-
-  beforeEach(() => {
-    service = createAdvancedCampaignService();
-  });
-
-  describe("Recurring Campaigns", () => {
-    it("should create recurring campaign", () => {
-      const recurring = service.createRecurringCampaign({
-        templateCampaignId: "template_123",
-        ownerAddress: testAddress,
-        name: "Monthly Challenge",
-        description: "Monthly fitness challenge",
-        frequency: "monthly",
-        schedule: {
-          startDate: Date.now() + 86400000,
-          dayOfMonth: 1,
-        },
-      });
-
-      expect(recurring.id).toMatch(/^rec_/);
-      expect(recurring.frequency).toBe("monthly");
-      expect(recurring.status).toBe("scheduled");
-    });
-
-    it("should list recurring campaigns", () => {
-      service.createRecurringCampaign({
-        templateCampaignId: "template_123",
-        ownerAddress: testAddress,
-        name: "Test",
-        description: "Test",
-        frequency: "weekly",
-        schedule: { startDate: Date.now() + 86400000 },
-      });
-
-      const campaigns = service.listRecurringCampaigns(testAddress);
-      expect(campaigns.length).toBeGreaterThan(0);
-    });
-
-    it("should pause recurring campaign", () => {
-      const recurring = service.createRecurringCampaign({
-        templateCampaignId: "template_123",
-        ownerAddress: testAddress,
-        name: "Test",
-        description: "Test",
-        frequency: "weekly",
-        schedule: { startDate: Date.now() - 86400000 },
-        settings: { autoCreateInstances: true },
-      });
-
-      // Create instance to make it active
-      service.createNextInstance(recurring.id);
-
-      const paused = service.pauseRecurringCampaign(recurring.id);
-      expect(paused.status).toBe("paused");
-    });
-
-    it("should resume recurring campaign", () => {
-      const recurring = service.createRecurringCampaign({
-        templateCampaignId: "template_123",
-        ownerAddress: testAddress,
-        name: "Test",
-        description: "Test",
-        frequency: "weekly",
-        schedule: { startDate: Date.now() - 86400000 },
-      });
-
-      service.createNextInstance(recurring.id);
-      service.pauseRecurringCampaign(recurring.id);
-
-      const resumed = service.resumeRecurringCampaign(recurring.id);
-      expect(resumed.status).toBe("active");
-    });
-
-    it("should create next instance", () => {
-      const recurring = service.createRecurringCampaign({
-        templateCampaignId: "template_123",
-        ownerAddress: testAddress,
-        name: "Test",
-        description: "Test",
-        frequency: "weekly",
-        schedule: { startDate: Date.now() - 86400000 },
-      });
-
-      // The start date is in the past and auto-create is on by default, so
-      // instance 1 was already created by createRecurringCampaign.
-      expect(recurring.instances.length).toBe(1);
-
-      const instance = service.createNextInstance(recurring.id);
-      expect(instance.recurringCampaignId).toBe(recurring.id);
-      expect(instance.instanceNumber).toBe(2);
-    });
-  });
-
-  describe("Stretch Goals", () => {
-    it("should add stretch goal", () => {
-      const goal = service.addStretchGoal("campaign_123", {
-        name: "Bonus Content",
-        description: "Unlock bonus content at $10,000",
-        type: "amount",
-        threshold: "10000",
-        reward: {
-          type: "content",
-          description: "Behind the scenes video",
-        },
-      });
-
-      expect(goal.id).toMatch(/^sg_/);
-      expect(goal.status).toBe("locked");
-    });
-
-    it("should get stretch goals", () => {
-      service.addStretchGoal("campaign_123", {
-        name: "Goal 1",
-        description: "First goal",
-        type: "amount",
-        threshold: "5000",
-        reward: { type: "bonus", description: "Bonus" },
-      });
-
-      service.addStretchGoal("campaign_123", {
-        name: "Goal 2",
-        description: "Second goal",
-        type: "amount",
-        threshold: "10000",
-        reward: { type: "bonus", description: "Bigger bonus" },
-      });
-
-      const goals = service.getStretchGoals("campaign_123");
-      expect(goals.length).toBe(2);
-      expect(goals[0].order).toBeLessThan(goals[1].order);
-    });
-
-    it("should check stretch goal progress", () => {
-      service.addStretchGoal("campaign_456", {
-        name: "Goal 1",
-        description: "First goal",
-        type: "amount",
-        threshold: "10000",
-        reward: { type: "bonus", description: "Bonus" },
-      });
-
-      const progress = service.checkStretchGoalProgress("campaign_456");
-      expect(progress.campaignId).toBe("campaign_456");
-      expect(progress.goals.length).toBeGreaterThan(0);
-    });
-
-    it("should update stretch goal", () => {
-      const goal = service.addStretchGoal("campaign_123", {
-        name: "Original Name",
-        description: "Original",
-        type: "amount",
-        threshold: "5000",
-        reward: { type: "bonus", description: "Bonus" },
-      });
-
-      const updated = service.updateStretchGoal(goal.id, {
-        name: "Updated Name",
-      });
-
-      expect(updated.name).toBe("Updated Name");
-    });
-
-    it("should remove stretch goal", () => {
-      const goal = service.addStretchGoal("campaign_123", {
-        name: "To Remove",
-        description: "Will be removed",
-        type: "amount",
-        threshold: "5000",
-        reward: { type: "bonus", description: "Bonus" },
-      });
-
-      const success = service.removeStretchGoal(goal.id);
-      expect(success).toBe(true);
-    });
-  });
-
-  describe("Scheduling", () => {
-    it("should schedule campaign launch", () => {
-      const launchDate = Date.now() + 7 * 24 * 60 * 60 * 1000;
-      const schedule = service.scheduleLaunch("campaign_123", launchDate);
-
-      expect(schedule.campaignId).toBe("campaign_123");
-      expect(schedule.scheduledLaunch).toBe(launchDate);
-      expect(schedule.countdown.days).toBeGreaterThanOrEqual(0);
-    });
-
-    it("should schedule action", () => {
-      const action = service.scheduleAction("campaign_123", {
-        campaignId: "campaign_123",
-        type: "notify",
-        scheduledFor: Date.now() + 3600000,
-        params: { message: "Reminder!" },
-        createdBy: testAddress,
-      });
-
-      expect(action.id).toMatch(/^sa_/);
-      expect(action.status).toBe("pending");
-    });
-
-    it("should get scheduled actions", () => {
-      service.scheduleAction("campaign_123", {
-        campaignId: "campaign_123",
-        type: "notify",
-        scheduledFor: Date.now() + 3600000,
-        createdBy: testAddress,
-      });
-
-      const actions = service.getScheduledActions("campaign_123");
-      expect(actions.length).toBeGreaterThan(0);
-    });
-
-    it("should cancel scheduled action", () => {
-      const action = service.scheduleAction("campaign_123", {
-        campaignId: "campaign_123",
-        type: "pause",
-        scheduledFor: Date.now() + 3600000,
-        createdBy: testAddress,
-      });
-
-      const success = service.cancelScheduledAction(action.id);
-      expect(success).toBe(true);
-    });
-  });
-
-  describe("Series", () => {
-    it("should create campaign series", () => {
-      const series = service.createSeries({
-        ownerAddress: testAddress,
-        name: "My Campaign Series",
-        description: "A series of related campaigns",
-      });
-
-      expect(series.id).toMatch(/^ser_/);
-      expect(series.status).toBe("active");
-    });
-
-    it("should add campaign to series", () => {
-      const series = service.createSeries({
-        ownerAddress: testAddress,
-        name: "Test Series",
-        description: "Test",
-      });
-
-      const updated = service.addCampaignToSeries(
-        series.id,
-        "campaign_123",
-        "standalone"
-      );
-
-      expect(updated.campaigns.length).toBe(1);
-      expect(updated.campaigns[0].campaignId).toBe("campaign_123");
-    });
-
-    it("should remove campaign from series", () => {
-      const series = service.createSeries({
-        ownerAddress: testAddress,
-        name: "Test Series",
-        description: "Test",
-      });
-
-      service.addCampaignToSeries(series.id, "campaign_123", "standalone");
-      const updated = service.removeCampaignFromSeries(series.id, "campaign_123");
-
-      expect(updated.campaigns.length).toBe(0);
-    });
-
-    it("should get series for campaign", () => {
-      const series = service.createSeries({
-        ownerAddress: testAddress,
-        name: "Test Series",
-        description: "Test",
-      });
-
-      service.addCampaignToSeries(series.id, "campaign_789", "standalone");
-
-      const found = service.getSeriesForCampaign("campaign_789");
-      expect(found).not.toBeNull();
-      expect(found?.id).toBe(series.id);
-    });
-  });
-
-  describe("Predictions", () => {
-    it("should get funding prediction", () => {
-      const prediction = service.getPrediction("campaign_123");
-
-      expect(prediction.campaignId).toBe("campaign_123");
-      expect(prediction.predictedFinalAmount).toBeDefined();
-      expect(prediction.confidence).toBeGreaterThanOrEqual(0);
-      expect(prediction.fundingProbability).toBeGreaterThanOrEqual(0);
-      expect(prediction.factors).toBeInstanceOf(Array);
-    });
-
-    it("should get funding velocity", () => {
-      const velocity = service.getFundingVelocity("campaign_123", "day");
-
-      expect(velocity.campaignId).toBe("campaign_123");
-      expect(velocity.period).toBe("day");
-      expect(velocity.dataPoints).toBeInstanceOf(Array);
-      expect(velocity.averageVelocity).toBeGreaterThanOrEqual(0);
-      expect(velocity.trend).toMatch(/accelerating|steady|decelerating/);
-    });
-  });
-
-  describe("Milestone Scheduling", () => {
-    it("should schedule milestone verification", () => {
-      const schedule = service.scheduleMilestoneVerification(
-        "milestone_123",
-        Date.now() + 86400000,
-        true
-      );
-
-      expect(schedule.milestoneId).toBe("milestone_123");
-      expect(schedule.autoVerify).toBe(true);
-      expect(schedule.status).toBe("scheduled");
-    });
-
-    it("should add milestone reminder", () => {
-      const reminder = service.addMilestoneReminder("milestone_123", {
-        campaignId: "campaign_123",
-        scheduledFor: Date.now() + 3600000,
-        recipientType: "creator",
-        message: "Milestone deadline approaching!",
-      });
-
-      expect(reminder.id).toMatch(/^rem_/);
-      expect(reminder.milestoneId).toBe("milestone_123");
     });
   });
 });

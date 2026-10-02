@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { createGdprService } from "../../compliance";
+import { apiUserData } from "../user-data";
 import {
   authMiddleware,
   isSelfOrAdmin,
@@ -46,7 +47,7 @@ function owned<T extends { userAddress: string }>(
 }
 
 // Initialize GDPR service
-export const gdprService = createGdprService();
+export const gdprService = createGdprService(apiUserData);
 
 // ============================================================================
 // DATA EXPORT (GDPR Art. 15, 20)
@@ -95,6 +96,24 @@ router.get("/export/:requestId", authMiddleware(), async (req: Request, res: Res
       error: error instanceof Error ? error.message : "Failed to get export status",
     });
   }
+});
+
+/**
+ * Download a completed export
+ * GET /v1/compliance/export/:requestId/download
+ */
+router.get("/export/:requestId/download", authMiddleware(), (req: Request, res: Response) => {
+  if (!owned(req, res, gdprService.getExportRequest(req.params.requestId), "Export request")) return;
+
+  const file = gdprService.downloadExport(req.params.requestId);
+  if (!file) {
+    return res.status(404).json({ error: "Export is not ready or has expired" });
+  }
+
+  const contentType = { json: "application/json", csv: "text/csv", xml: "application/xml" }[file.format];
+  res.setHeader("Content-Type", `${contentType}; charset=utf-8`);
+  res.setHeader("Content-Disposition", `attachment; filename="data-export-${req.params.requestId}.${file.format}"`);
+  res.send(file.content);
 });
 
 /**
