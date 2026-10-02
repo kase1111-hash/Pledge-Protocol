@@ -7,6 +7,7 @@
 import { Router, Request, Response, NextFunction } from "express";
 import { createOrganizationService } from "../../enterprise";
 import { TeamPermission } from "../../enterprise/types";
+import { cancelCampaignAs, createCampaignFrom } from "./campaigns";
 import { authMiddleware, hasRole, requireSelfOrAdmin } from "../../security/middleware";
 
 const router = Router();
@@ -38,6 +39,30 @@ function assignableRole(role: unknown): boolean {
 }
 // Initialize organization service
 export const orgService = createOrganizationService();
+
+// Campaign items in bulk operations go through the same validation, escrow
+// refunds and events as the campaign routes; the requesting member is the
+// campaign creator
+orgService.setBulkHandlers({
+  campaign_create: async (item, createdBy) => ({ id: (await createCampaignFrom(item, createdBy)).id }),
+  campaign_cancel: async (item, createdBy) => {
+    if (typeof item?.campaignId !== "string") {
+      throw new Error("campaignId is required");
+    }
+    await cancelCampaignAs(item.campaignId, createdBy);
+    return { id: item.campaignId };
+  },
+});
+
+/** Permission each kind of bulk operation needs */
+const BULK_PERMISSIONS: Record<string, TeamPermission> = {
+  campaign_create: "campaigns:create",
+  campaign_update: "campaigns:manage",
+  campaign_cancel: "campaigns:manage",
+  pledge_refund: "pledges:refund",
+  member_invite: "org:members",
+  member_remove: "org:members",
+};
 
 // ============================================================================
 // ORGANIZATIONS
@@ -481,16 +506,26 @@ router.post("/orgs/:orgId/billing/upgrade", orgPermission("org:billing"), async 
  * Create bulk operation
  * POST /v1/enterprise/orgs/:orgId/bulk
  */
-router.post("/orgs/:orgId/bulk", orgPermission("campaigns:manage"), async (req: Request, res: Response) => {
-  try {
-    const { type, inputData } = req.body;
-    const createdBy = req.auth!.address;
+router.post("/orgs/:orgId/bulk", orgPermission("campaigns:view"), async (req: Request, res: Response) => {
+  const { type, inputData } = req.body;
+  const createdBy = req.auth!.address;
 
-    if (!type || !inputData) {
-      return res.status(400).json({
-        error: "type and inputData are required",
-      });
-    }
+  if (!type || !inputData) {
+    return res.status(400).json({
+      error: "type and inputData are required",
+    });
+  }
+
+  const permission = BULK_PERMISSIONS[type];
+  if (
+    permission &&
+    !hasRole(req, "admin") &&
+    !orgService.hasPermission(req.params.orgId, createdBy, permission)
+  ) {
+    return res.status(403).json({ error: `Requires the ${permission} permission` });
+  }
+
+  try {
     const operation = orgService.createBulkOperation(req.params.orgId, {
       type,
       inputData,
@@ -499,7 +534,7 @@ router.post("/orgs/:orgId/bulk", orgPermission("campaigns:manage"), async (req: 
 
     res.status(202).json(operation);
   } catch (error) {
-    res.status(500).json({
+    res.status(400).json({
       error: error instanceof Error ? error.message : "Bulk operation failed",
     });
   }

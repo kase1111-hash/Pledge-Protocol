@@ -192,6 +192,8 @@ export interface DataDeletionRequest {
   progress: number;
   deletedRecords: number;
   anonymizedRecords: number;
+  /** Records kept for legal reasons (escrow, payments, audit) */
+  retainedRecords?: number;
 
   // Timing
   requestedAt: number;

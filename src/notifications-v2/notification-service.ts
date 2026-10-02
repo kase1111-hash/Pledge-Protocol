@@ -32,6 +32,10 @@ import {
   SmsMessage,
   SmsDeliveryResult,
 } from "./types";
+import { formatEther } from "ethers";
+import { campaignsCreatedBy, getStore, pledgesByBacker } from "../database";
+import { socialService } from "../social";
+import { DeliveryEndpoints, DEFAULT_ENDPOINTS, deliverEmail, deliverPush, deliverSms } from "./providers";
 
 // ============================================================================
 // BUILT-IN TEMPLATES
@@ -178,7 +182,55 @@ const BUILT_IN_TEMPLATES: NotificationTemplate[] = [
     variables: ["campaignName", "disputeTitle", "disputeUrl"],
     metadata: { createdAt: Date.now(), updatedAt: Date.now(), version: 1 },
   },
+  // Results and account
+  emailTemplate("pledge_released", "Your pledge to '{{campaignName}}' was released",
+    "Pledge Released", "{{amount}} from your pledge to '{{campaignName}}' was released to {{beneficiaryName}}.",
+    "{{campaignUrl}}", "View Campaign"),
+  emailTemplate("pledge_refunded", "Your pledge to '{{campaignName}}' was refunded",
+    "Pledge Refunded", "{{amount}} from your pledge to '{{campaignName}}' was refunded to you.",
+    "{{campaignUrl}}", "View Campaign"),
+  emailTemplate("campaign_resolved", "'{{campaignName}}' has been resolved",
+    "Campaign Resolved", "'{{campaignName}}' was resolved: {{releasedAmount}} released, {{refundedAmount}} refunded.",
+    "{{campaignUrl}}", "View Results"),
+  emailTemplate("security_alert", "Security alert for your Pledge Protocol account",
+    "Security Alert", "{{message}}", "{{baseUrl}}/settings/security", "Review Activity"),
+  emailTemplate("weekly_digest", "Your Pledge Protocol summary ({{periodStart}} – {{periodEnd}})",
+    "Your Summary",
+    "From {{periodStart}} to {{periodEnd}}: {{pledgesReceived}} new pledges ({{amountRaised}} ETH), " +
+      "{{milestonesVerified}} milestones verified, {{newFollowers}} new followers and " +
+      "{{deadlinesCount}} pledge windows closing soon.",
+    "{{baseUrl}}/dashboard", "Open Dashboard"),
+  emailTemplate("monthly_report", "Your Pledge Protocol month ({{periodStart}} – {{periodEnd}})",
+    "Your Month",
+    "From {{periodStart}} to {{periodEnd}}: {{pledgesReceived}} new pledges ({{amountRaised}} ETH), " +
+      "{{milestonesVerified}} milestones verified, {{newFollowers}} new followers and " +
+      "{{deadlinesCount}} pledge windows closing soon.",
+    "{{baseUrl}}/dashboard", "Open Dashboard"),
 ];
+
+function emailTemplate(
+  type: NotificationType,
+  subject: string,
+  title: string,
+  body: string,
+  actionUrl: string,
+  actionLabel: string
+): NotificationTemplate {
+  return {
+    id: `tpl_${type}_email_en`,
+    type,
+    channel: "email",
+    locale: "en",
+    subject,
+    title,
+    body,
+    bodyHtml: `<h1>${title}</h1><p>${body}</p><a href="${actionUrl}">${actionLabel}</a>`,
+    actionUrl,
+    actionLabel,
+    variables: Array.from(new Set(Array.from(`${subject} ${body} ${actionUrl}`.matchAll(/\{\{(\w+)\}\}/g), (m) => m[1]))),
+    metadata: { createdAt: Date.now(), updatedAt: Date.now(), version: 1 },
+  };
+}
 
 // ============================================================================
 // DEFAULT PREFERENCES
@@ -229,21 +281,26 @@ export class NotificationService {
   private preferences: Map<string, NotificationPreferences> = new Map();
   private notifications: Map<string, Notification> = new Map();
   private inAppNotifications: Map<string, InAppNotification[]> = new Map();
-  private emailConfig: EmailConfig;
-  private pushConfig: PushConfig;
+  /** When each address was last sent (or offered) its scheduled digest */
+  private digestsSentAt: Map<string, number> = new Map();
+  private emailConfig?: EmailConfig;
+  private pushConfig?: PushConfig;
   private smsConfig?: SmsConfig;
   private baseUrl: string;
+  private endpoints: DeliveryEndpoints;
 
   constructor(config: {
-    emailConfig: EmailConfig;
-    pushConfig: PushConfig;
+    emailConfig?: EmailConfig;
+    pushConfig?: PushConfig;
     smsConfig?: SmsConfig;
     baseUrl: string;
+    endpoints?: Partial<DeliveryEndpoints>;
   }) {
     this.emailConfig = config.emailConfig;
     this.pushConfig = config.pushConfig;
     this.smsConfig = config.smsConfig;
     this.baseUrl = config.baseUrl;
+    this.endpoints = { ...DEFAULT_ENDPOINTS, ...config.endpoints };
 
     // Load built-in templates
     for (const template of BUILT_IN_TEMPLATES) {
@@ -322,6 +379,26 @@ export class NotificationService {
     return notifications[0] || this.createFailedNotification(request);
   }
 
+  /**
+   * Deliver queued notifications whose time has come (quiet hours, scheduled
+   * sends); expired ones are marked failed
+   */
+  async processDueNotifications(now: number = Date.now()): Promise<Notification[]> {
+    const due = Array.from(this.notifications.values()).filter(
+      (n) => n.status === "queued" && (n.scheduledFor ?? 0) <= now
+    );
+    for (const notification of due) {
+      if (notification.expiresAt && notification.expiresAt <= now) {
+        notification.status = "failed";
+        notification.delivery.errorMessage = "Expired before it could be sent";
+      } else {
+        await this.deliverNotification(notification);
+      }
+      this.notifications.set(notification.id, notification);
+    }
+    return due;
+  }
+
   async sendBulk(requests: CreateNotificationRequest[]): Promise<Notification[]> {
     const results: Notification[] = [];
     for (const request of requests) {
@@ -331,16 +408,17 @@ export class NotificationService {
     return results;
   }
 
+  /**
+   * Send to everyone subscribed to a topic (see getTopicSubscribers)
+   */
   async sendToTopic(topic: string, request: CreateNotificationRequest): Promise<number> {
-    // In a real implementation, this would query subscribers
-    // For now, simulate topic sending
-    const subscribers = this.getTopicSubscribers(topic);
+    const subscribers = await this.getTopicSubscribers(topic);
     let sentCount = 0;
 
     for (const address of subscribers) {
       try {
-        await this.send({ ...request, recipientAddress: address });
-        sentCount++;
+        const notification = await this.send({ ...request, recipientAddress: address });
+        if (notification.status !== "failed") sentCount++;
       } catch {
         // Continue with other subscribers
       }
@@ -396,14 +474,7 @@ export class NotificationService {
       },
     };
 
-    // Simulate email sending
-    // In production, this would call SendGrid, SES, etc.
-    console.log(`[Email] Sending to ${message.to}: ${message.subject}`);
-
-    return {
-      success: true,
-      messageId: `msg_${Date.now()}`,
-    };
+    return deliverEmail(this.emailConfig, message, this.endpoints);
   }
 
   private async sendPush(notification: Notification): Promise<PushDeliveryResult> {
@@ -423,16 +494,7 @@ export class NotificationService {
       clickAction: notification.rendered.actionUrl,
     };
 
-    // Simulate push sending
-    // In production, this would call Firebase, APNS, etc.
-    console.log(`[Push] Sending to ${message.tokens.length} devices: ${message.title}`);
-
-    return {
-      success: true,
-      successCount: message.tokens.length,
-      failureCount: 0,
-      failedTokens: [],
-    };
+    return deliverPush(this.pushConfig, message, this.endpoints);
   }
 
   private createInAppNotification(notification: Notification): void {
@@ -467,22 +529,12 @@ export class NotificationService {
       throw new Error("No recipient phone number");
     }
 
-    if (!this.smsConfig) {
-      throw new Error("SMS not configured");
-    }
-
     const message: SmsMessage = {
       to: notification.recipientPhone,
       body: notification.rendered.body,
     };
 
-    // Simulate SMS sending
-    console.log(`[SMS] Sending to ${message.to}: ${message.body}`);
-
-    return {
-      success: true,
-      messageId: `sms_${Date.now()}`,
-    };
+    return deliverSms(this.smsConfig, message, this.endpoints);
   }
 
   private createFailedNotification(request: CreateNotificationRequest): Notification {
@@ -524,6 +576,19 @@ export class NotificationService {
       template = this.templates.get(`${type}:${channel}:en`);
     }
 
+    // Short channels (push, SMS, in-app) reuse the plain-text title and body
+    // of another channel's template for the same type
+    if (!template && channel !== "email") {
+      for (const other of ["in_app", "push", "email"] as NotificationChannel[]) {
+        const fallback =
+          this.templates.get(`${type}:${other}:${locale}`) ?? this.templates.get(`${type}:${other}:en`);
+        if (fallback) {
+          template = { ...fallback, channel, subject: undefined, bodyHtml: undefined };
+          break;
+        }
+      }
+    }
+
     return template || null;
   }
 
@@ -559,9 +624,11 @@ export class NotificationService {
   getPreferences(address: string): NotificationPreferences {
     let prefs = this.preferences.get(address);
     if (!prefs) {
+      // Deep copy: the defaults' arrays and objects must not be shared
+      // between users (a device registered for one would reach everyone)
       prefs = {
+        ...structuredClone(DEFAULT_PREFERENCES),
         address,
-        ...DEFAULT_PREFERENCES,
         updatedAt: Date.now(),
       };
       this.preferences.set(address, prefs);
@@ -712,9 +779,34 @@ export class NotificationService {
     return now.getTime();
   }
 
-  private getTopicSubscribers(_topic: string): string[] {
-    // In production, this would query a topic subscription database
-    return [];
+  /**
+   * Topics:
+   *  - "campaign:<id>"       the campaign's creator and backers
+   *  - "backers:<id>"        the campaign's backers
+   *  - "followers:<address>" people following the address
+   *  - "all"                 everyone with notification preferences
+   */
+  async getTopicSubscribers(topic: string): Promise<string[]> {
+    const [kind, ...rest] = topic.split(":");
+    const target = rest.join(":");
+    const unique = (addresses: string[]) => Array.from(new Set(addresses.map((a) => a.toLowerCase())));
+
+    switch (kind) {
+      case "campaign":
+      case "backers": {
+        const campaign = await getStore().getCampaign(target);
+        if (!campaign) throw new Error(`Campaign ${target} not found`);
+        const { items } = await getStore().listPledges({ campaignId: target });
+        const backers = items.filter((p) => p.status !== "cancelled").map((p) => p.backer);
+        return unique(kind === "campaign" ? [campaign.creator, ...backers] : backers);
+      }
+      case "followers":
+        return unique(socialService.getFollowRecords(target).map((f) => f.follower));
+      case "all":
+        return unique(Array.from(this.preferences.keys()));
+      default:
+        throw new Error(`Unknown topic "${topic}" (use campaign:<id>, backers:<id>, followers:<address> or all)`);
+    }
   }
 
   // ==========================================================================
@@ -804,50 +896,135 @@ export class NotificationService {
   // DIGEST
   // ==========================================================================
 
-  generateDigest(
+  /**
+   * Activity on the address's campaigns over the period, from the store and
+   * social records, with upcoming deadlines for campaigns they run or back
+   */
+  async generateDigest(
     address: string,
     period: "daily" | "weekly" | "monthly"
-  ): DigestContent {
+  ): Promise<DigestContent> {
+    const DAY = 24 * 60 * 60 * 1000;
     const now = Date.now();
-    let start: number;
+    const start = now - { daily: 1, weekly: 7, monthly: 30 }[period] * DAY;
+    const inPeriod = (seconds: number | null | undefined) =>
+      seconds !== null && seconds !== undefined && seconds * 1000 >= start && seconds * 1000 <= now;
 
-    switch (period) {
-      case "daily":
-        start = now - 24 * 60 * 60 * 1000;
-        break;
-      case "weekly":
-        start = now - 7 * 24 * 60 * 60 * 1000;
-        break;
-      case "monthly":
-        start = now - 30 * 24 * 60 * 60 * 1000;
-        break;
+    const created = await campaignsCreatedBy(address);
+    let pledgesReceived = 0;
+    let amountRaised = 0n;
+    let milestonesVerified = 0;
+    const highlights: DigestHighlight[] = [];
+
+    for (const campaign of created) {
+      const { items } = await getStore().listPledges({ campaignId: campaign.id });
+      const recent = items.filter((p) => p.status !== "cancelled" && inPeriod(p.createdAt));
+      const raised = recent.reduce((sum, p) => sum + BigInt(p.escrowedAmount), 0n);
+      pledgesReceived += recent.length;
+      amountRaised += raised;
+
+      for (const milestone of campaign.milestones) {
+        if (milestone.status === "verified" && inPeriod(milestone.verifiedAt)) {
+          milestonesVerified++;
+          highlights.push({
+            type: "milestone_verified",
+            title: `${milestone.name} verified`,
+            description: `${milestone.name} was verified for ${campaign.name}`,
+            url: `${this.baseUrl}/campaigns/${campaign.id}`,
+          });
+        }
+      }
+      if (recent.length > 0) {
+        highlights.push({
+          type: "trending",
+          title: campaign.name,
+          description: `${recent.length} new pledge${recent.length === 1 ? "" : "s"} totalling ${formatEther(raised)} ETH`,
+          url: `${this.baseUrl}/campaigns/${campaign.id}`,
+        });
+      }
     }
 
-    // In production, this would aggregate real data
-    const highlights: DigestHighlight[] = [];
-    const upcomingDeadlines: DigestDeadline[] = [];
+    // Pledge windows closing in the next week, for campaigns run or backed
+    const backed = (await pledgesByBacker(address)).filter((p) => p.status === "active").map((p) => p.campaignId);
+    const relevant = new Map(created.map((c) => [c.id, c]));
+    for (const id of backed) {
+      if (!relevant.has(id)) {
+        const campaign = await getStore().getCampaign(id);
+        if (campaign) relevant.set(id, campaign);
+      }
+    }
+    const upcomingDeadlines: DigestDeadline[] = Array.from(relevant.values())
+      .filter((c) => c.status === "active" && c.pledgeWindowEnd * 1000 > now && c.pledgeWindowEnd * 1000 <= now + 7 * DAY)
+      .map((c) => ({ campaignId: c.id, campaignName: c.name, deadline: c.pledgeWindowEnd * 1000, type: "campaign_end" as const }))
+      .sort((x, y) => x.deadline - y.deadline);
+
+    const createdIds = new Set(created.map((c) => c.id));
+    const author = address.toLowerCase();
+    const commentsReceived = created.length
+      ? Array.from(createdIds).reduce(
+          (n, campaignId) =>
+            n +
+            socialService
+              .listComments({ campaignId })
+              .filter((c) => c.author !== author && c.createdAt >= start && c.createdAt <= now).length,
+          0
+        )
+      : 0;
 
     return {
       address,
       period: { start, end: now },
       summary: {
-        campaignsCreated: 0,
-        pledgesReceived: 0,
-        amountRaised: "0",
-        milestonesVerified: 0,
-        newFollowers: 0,
-        commentsReceived: 0,
+        campaignsCreated: created.filter((c) => inPeriod(c.createdAt)).length,
+        pledgesReceived,
+        amountRaised: formatEther(amountRaised),
+        milestonesVerified,
+        newFollowers: socialService.getFollowRecords(address).filter((f) => f.createdAt >= start && f.createdAt <= now).length,
+        commentsReceived,
       },
       highlights,
       upcomingDeadlines,
     };
   }
 
+  /**
+   * Send scheduled digests: at each user's chosen time (UTC), on their chosen
+   * day for weekly and monthly digests, at most once per day
+   */
+  async processDueDigests(now: number = Date.now()): Promise<string[]> {
+    const date = new Date(now);
+    const today = date.toISOString().slice(0, 10);
+    const sent: string[] = [];
+
+    for (const [address, preferences] of this.preferences) {
+      const digest = preferences.digest;
+      if (!digest?.enabled) continue;
+
+      const [hour, minute] = (digest.timeOfDay || "09:00").split(":").map(Number);
+      const minutesNow = date.getUTCHours() * 60 + date.getUTCMinutes();
+      if (minutesNow < hour * 60 + (minute || 0)) continue;
+      if (digest.frequency === "weekly" && date.getUTCDay() !== (digest.dayOfWeek ?? 1)) continue;
+      if (digest.frequency === "monthly" && date.getUTCDate() !== (digest.dayOfMonth ?? 1)) continue;
+
+      const last = this.digestsSentAt.get(address);
+      if (last !== undefined && new Date(last).toISOString().slice(0, 10) === today) continue;
+
+      this.digestsSentAt.set(address, now);
+      const content = await this.generateDigest(address, digest.frequency);
+      if (await this.sendDigest(address, content)) sent.push(address);
+    }
+
+    return sent;
+  }
+
   async sendDigest(address: string, content: DigestContent): Promise<boolean> {
     const hasActivity =
       content.summary.pledgesReceived > 0 ||
       content.summary.milestonesVerified > 0 ||
-      content.highlights.length > 0;
+      content.summary.newFollowers > 0 ||
+      content.summary.commentsReceived > 0 ||
+      content.highlights.length > 0 ||
+      content.upcomingDeadlines.length > 0;
 
     if (!hasActivity) {
       return false; // Don't send empty digests
@@ -858,7 +1035,7 @@ export class NotificationService {
       return false;
     }
 
-    await this.send({
+    const notification = await this.send({
       recipientAddress: address,
       type: content.period.end - content.period.start > 7 * 24 * 60 * 60 * 1000
         ? "monthly_report"
@@ -878,12 +1055,56 @@ export class NotificationService {
       },
     });
 
-    return true;
+    return notification.status !== "failed";
   }
 
   // ==========================================================================
   // ANALYTICS
   // ==========================================================================
+
+  // ==========================================================================
+  // PERSONAL DATA (GDPR)
+  // ==========================================================================
+
+  /** A user's preferences (including devices) and notifications */
+  exportUser(address: string): {
+    preferences: NotificationPreferences | null;
+    notifications: Notification[];
+    inApp: InAppNotification[];
+  } {
+    const user = address.toLowerCase();
+    return {
+      preferences: Array.from(this.preferences.entries()).find(([a]) => a.toLowerCase() === user)?.[1] ?? null,
+      notifications: Array.from(this.notifications.values()).filter(
+        (n) => n.recipientAddress.toLowerCase() === user
+      ),
+      inApp: Array.from(this.inAppNotifications.entries())
+        .filter(([a]) => a.toLowerCase() === user)
+        .flatMap(([, list]) => list),
+    };
+  }
+
+  /** Delete a user's preferences, devices and notifications; returns records removed */
+  eraseUser(address: string): number {
+    const user = address.toLowerCase();
+    let deleted = 0;
+    for (const key of Array.from(this.preferences.keys())) {
+      if (key.toLowerCase() === user && this.preferences.delete(key)) deleted++;
+    }
+    for (const [key, list] of Array.from(this.inAppNotifications.entries())) {
+      if (key.toLowerCase() === user) {
+        deleted += list.length;
+        this.inAppNotifications.delete(key);
+      }
+    }
+    for (const [id, notification] of Array.from(this.notifications.entries())) {
+      if (notification.recipientAddress.toLowerCase() === user && this.notifications.delete(id)) deleted++;
+    }
+    for (const key of Array.from(this.digestsSentAt.keys())) {
+      if (key.toLowerCase() === user) this.digestsSentAt.delete(key);
+    }
+    return deleted;
+  }
 
   getDeliveryStats(filters?: NotificationStatsQuery): NotificationStats {
     const startDate = filters?.startDate || Date.now() - 30 * 24 * 60 * 60 * 1000;
@@ -965,21 +1186,53 @@ export function createNotificationService(config: {
   return new NotificationService(config);
 }
 
-// Default instance for testing
-export const notificationService = new NotificationService({
-  emailConfig: {
-    provider: "sendgrid",
-    apiKey: process.env.SENDGRID_API_KEY,
-    fromEmail: "notifications@pledgeprotocol.io",
-    fromName: "Pledge Protocol",
-  },
-  pushConfig: {
-    provider: "firebase",
-    firebaseConfig: {
-      projectId: process.env.FIREBASE_PROJECT_ID || "",
-      privateKey: process.env.FIREBASE_PRIVATE_KEY || "",
-      clientEmail: process.env.FIREBASE_CLIENT_EMAIL || "",
-    },
-  },
-  baseUrl: process.env.BASE_URL || "https://app.pledgeprotocol.io",
-});
+// Default instance, configured from the environment
+export const notificationService = new NotificationService(configFromEnv());
+
+/**
+ * Delivery settings from the environment; channels without credentials fail
+ * with an explanatory error
+ */
+export function configFromEnv(env: NodeJS.ProcessEnv = process.env): {
+  emailConfig?: EmailConfig;
+  pushConfig?: PushConfig;
+  smsConfig?: SmsConfig;
+  baseUrl: string;
+} {
+  const emailProvider = (env.EMAIL_PROVIDER || "sendgrid") as EmailConfig["provider"];
+  const emailKey = emailProvider === "mailgun" ? env.MAILGUN_API_KEY : env.SENDGRID_API_KEY;
+  const pushProvider = (env.PUSH_PROVIDER || "firebase") as PushConfig["provider"];
+
+  return {
+    emailConfig: emailKey
+      ? {
+          provider: emailProvider,
+          apiKey: emailKey,
+          domain: env.MAILGUN_DOMAIN,
+          fromEmail: env.EMAIL_FROM || "notifications@pledgeprotocol.io",
+          fromName: env.EMAIL_FROM_NAME || "Pledge Protocol",
+          replyTo: env.EMAIL_REPLY_TO,
+        }
+      : undefined,
+    pushConfig:
+      pushProvider === "onesignal"
+        ? { provider: "onesignal", oneSignalConfig: { appId: env.ONESIGNAL_APP_ID || "", apiKey: env.ONESIGNAL_API_KEY || "" } }
+        : {
+            provider: pushProvider,
+            firebaseConfig: {
+              projectId: env.FIREBASE_PROJECT_ID || "",
+              privateKey: env.FIREBASE_PRIVATE_KEY || "",
+              clientEmail: env.FIREBASE_CLIENT_EMAIL || "",
+            },
+          },
+    smsConfig: env.TWILIO_ACCOUNT_SID
+      ? {
+          provider: "twilio",
+          accountSid: env.TWILIO_ACCOUNT_SID,
+          authToken: env.TWILIO_AUTH_TOKEN,
+          fromNumber: env.TWILIO_FROM_NUMBER || "",
+        }
+      : undefined,
+    baseUrl: env.APP_URL || "https://app.pledgeprotocol.io",
+  };
+}

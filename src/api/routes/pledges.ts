@@ -4,6 +4,7 @@ import { randomBytes } from "crypto";
 import { v4 as uuidv4 } from "uuid";
 import { authMiddleware, asyncHandler, sameAddress } from "../../security/middleware";
 import { getStore, Pledge, PledgeStatus } from "../../database";
+import { pledgeEvent } from "../../events";
 
 const router = Router();
 
@@ -175,7 +176,10 @@ router.post("/", authMiddleware(), asyncHandler(async (req: Request, res: Respon
     campaign.updatedAt = timestamp;
     await tx.saveCampaign(campaign);
 
-    return () => res.status(201).json(toResponse(pledge));
+    return () => {
+      pledgeEvent("pledge_created", campaign, pledge);
+      res.status(201).json(toResponse(pledge));
+    };
   });
 
   result();
@@ -259,12 +263,15 @@ router.delete("/:id", authMiddleware(), asyncHandler(async (req: Request, res: R
     campaign.updatedAt = timestamp;
     await tx.saveCampaign(campaign);
 
-    return () => res.json({
-      id: pledge.id,
-      status: pledge.status,
-      refundedAmount: pledge.escrowedAmount,
-      refundTxHash: null, // Would be populated from blockchain
-    });
+    return () => {
+      pledgeEvent("pledge_cancelled", campaign, pledge);
+      res.json({
+        id: pledge.id,
+        status: pledge.status,
+        refundedAmount: pledge.escrowedAmount,
+        refundTxHash: null, // Would be populated from blockchain
+      });
+    };
   });
 
   result();

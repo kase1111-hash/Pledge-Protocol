@@ -13,3 +13,4 @@ export * from "./memory-store";
 export * from "./postgres-store";
 export * from "./database-service";
 export * from "./collections";
+export * from "./queries";

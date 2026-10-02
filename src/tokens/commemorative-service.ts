@@ -93,7 +93,7 @@ export class CommemorativeService extends EventEmitter {
   private storage: StorageService;
   private uploader: BatchUploader;
 
-  // In-memory storage (to be replaced with database in production)
+  // Kept in memory and persisted by the API (see api/persistence)
   private records: Map<string, CommemorativeRecord> = new Map();
   private recordsByPledge: Map<string, string> = new Map();
   private recordsByCampaign: Map<string, string[]> = new Map();

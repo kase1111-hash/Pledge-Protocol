@@ -1,5 +1,6 @@
 import { BaseOracleProvider } from "../base-provider";
 import { OracleConfig, OracleResponse } from "../types";
+import { requestUserUrl } from "../../security/outbound";
 
 /**
  * API Oracle Provider
@@ -33,7 +34,7 @@ export class ApiOracleProvider extends BaseOracleProvider {
 
     const mappedParams = this.mapQueryParams(params);
     const timeout = this.config.timeout || 10000;
-    const retries = this.config.retries || 3;
+    const retries = this.config.retries ?? 3;
     const retryDelay = this.config.retryDelay || 1000;
 
     let lastError: Error | null = null;
@@ -82,37 +83,27 @@ export class ApiOracleProvider extends BaseOracleProvider {
     };
   }
 
+  /**
+   * Endpoints are configured by admins, but are still kept off private and
+   * internal addresses (see security/outbound)
+   */
   private async makeRequest(
     params: Record<string, any>,
     timeout: number
   ): Promise<any> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeout);
+    const response = await requestUserUrl(this.buildUrl(params), {
+      method: this.config.method === "POST" ? "POST" : "GET",
+      headers: this.buildHeaders(),
+      body: this.config.method === "POST" ? JSON.stringify(params) : undefined,
+      timeoutMs: timeout,
+      maxResponseBytes: 1024 * 1024,
+    });
 
-    try {
-      const url = this.buildUrl(params);
-      const headers = this.buildHeaders();
-
-      const options: RequestInit = {
-        method: this.config.method || "GET",
-        headers,
-        signal: controller.signal,
-      };
-
-      if (this.config.method === "POST") {
-        options.body = JSON.stringify(params);
-      }
-
-      const response = await fetch(url, options);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      return await response.json();
-    } finally {
-      clearTimeout(timeoutId);
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`HTTP ${response.status}`);
     }
+
+    return JSON.parse(response.body);
   }
 
   private buildUrl(params: Record<string, any>): string {
@@ -160,16 +151,9 @@ export class ApiOracleProvider extends BaseOracleProvider {
 
   async healthCheck(): Promise<boolean> {
     try {
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-      const response = await fetch(this.config.endpoint!, {
-        method: "HEAD",
-        signal: controller.signal,
-      });
-
-      clearTimeout(timeoutId);
-      return response.ok || response.status === 405; // 405 = Method Not Allowed is OK for HEAD
+      const response = await requestUserUrl(this.config.endpoint!, { method: "HEAD", timeoutMs: 5000 });
+      const ok = response.status >= 200 && response.status < 300;
+      return ok || response.status === 405; // 405 = Method Not Allowed is OK for HEAD
     } catch {
       return false;
     }

@@ -74,6 +74,8 @@ export interface SlackConfig {
   channelId: string;
   channelName: string;
   botToken: string;
+  /** Incoming webhook granted at install time (posts to channelId) */
+  webhookUrl?: string;
   accessToken?: string;
   teamId?: string;
   installedBy?: string;

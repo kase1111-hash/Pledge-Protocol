@@ -15,6 +15,12 @@ import app from "../src/api/app";
 import { initializeOracles } from "../src/api/routes/oracles";
 import { closeDatabase, setStore } from "../src/database";
 import { storeBackends } from "./helpers/stores";
+import { gdprService } from "../src/api/routes/compliance";
+import { getStore } from "../src/database";
+import { flushEvents } from "../src/events";
+import { notificationService } from "../src/notifications";
+import http from "http";
+import { AddressInfo } from "net";
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 const HOUR = 3600;
@@ -611,6 +617,60 @@ for (const backend of storeBackends("api_integration_test")) {
         expect((await as(sessions.backer).get("/v1/compliance/stats")).status).toBe(403);
       });
 
+      it("exports a user's real data and erases it after the grace period", async () => {
+        const subject = Wallet.createRandom();
+        const subjectSession = await login(subject);
+        const user = as(subjectSession);
+
+        const campaignId = await activeCampaign();
+        const pledged = await user.post("/v1/pledges", {
+          campaignId, pledgeTypeId: "pt_0", amount: "500", backerName: "Alice",
+        });
+        expect(pledged.status).toBe(201);
+        expect((await user.put(`/v1/i18n/preferences/${subject.address}`, { locale: "de" })).status).toBe(200);
+        expect((await user.put("/v1/social/users/me", { displayName: "Alice" })).status).toBe(200);
+
+        // Export: the user's actual pledge and preferences, downloadable
+        const requested = await user.post("/v1/compliance/export", { format: "json" });
+        let status = requested.body.status;
+        for (let i = 0; i < 50 && status !== "completed"; i++) {
+          await new Promise((r) => setTimeout(r, 10));
+          status = (await user.get(`/v1/compliance/export/${requested.body.requestId}`)).body.status;
+        }
+        expect(status).toBe("completed");
+
+        const download = await user.get(`/v1/compliance/export/${requested.body.requestId}/download`);
+        expect(download.status).toBe(200);
+        const exported = JSON.parse(download.text);
+        expect(exported.data.pledges.map((p: { id: string }) => p.id)).toContain(pledged.body.id);
+        expect(exported.data.preferences.locale.locale).toBe("de");
+        expect(exported.data.profile.profile.displayName).toBe("Alice");
+        expect((await as(sessions.stranger).get(`/v1/compliance/export/${requested.body.requestId}/download`)).status).toBe(404);
+
+        // Erasure waits out the grace period, then removes personal data and
+        // keeps the escrow record
+        const deletion = await user.post("/v1/compliance/delete", {
+          type: "anonymize",
+          categories: ["profile", "social", "preferences", "pledges"],
+        });
+        const confirmed = await user.post(`/v1/compliance/delete/${deletion.body.requestId}/confirm`, {
+          confirmationToken: deletion.body.confirmationToken,
+        });
+        expect(confirmed.status).toBe(200);
+        expect(gdprService.getDeletionRequest(deletion.body.requestId)!.status).toBe("pending");
+
+        await gdprService.processDueDeletions(Date.now() + 8 * 24 * 3600 * 1000);
+        const done = gdprService.getDeletionRequest(deletion.body.requestId)!;
+        expect(done.status).toBe("completed");
+        expect(done.deletedRecords).toBeGreaterThanOrEqual(2); // profile + locale preferences
+        expect(done.anonymizedRecords).toBe(1); // the pledge's display name
+        expect(done.retainedRecords).toBe(1); // the pledge itself
+
+        const pledge = await getStore().getPledge(pledged.body.id);
+        expect(pledge).toMatchObject({ backerName: null, escrowedAmount: "500" });
+        expect((await user.get(`/v1/i18n/preferences/${subject.address}`)).body.locale).not.toBe("de");
+      });
+
       it("limits organizations to their members and permissions", async () => {
         const created = await as(sessions.creator).post("/v1/enterprise/orgs", {
           name: `Org ${Date.now()}`,
@@ -639,6 +699,69 @@ for (const backend of storeBackends("api_integration_test")) {
         const updated = await as(sessions.creator).put(path(), { name: "Renamed", id: "org_other", status: "suspended" });
         expect(updated.body).toMatchObject({ id: orgId, name: "Renamed" });
         expect(updated.body.status).not.toBe("suspended");
+      });
+
+      it("runs organization bulk operations against real campaigns", async () => {
+        const created = await as(sessions.creator).post("/v1/enterprise/orgs", {
+          name: `Bulk ${Date.now()}`,
+          type: "nonprofit",
+          contactEmail: "org@example.com",
+        });
+        const path = (suffix = "") => `/v1/enterprise/orgs/${created.body.id}${suffix}`;
+        await as(sessions.creator).post(path("/members"), { userAddress: backer.address, role: "viewer" });
+
+        const start = now();
+        const definition = (name: string) => ({
+          name,
+          description: "Bulk created",
+          beneficiary: creator.address,
+          beneficiaryName: "Charity",
+          pledgeWindowStart: start,
+          pledgeWindowEnd: start + HOUR,
+          resolutionDeadline: start + 24 * HOUR,
+          milestones: [{
+            name: "Finish", description: "Finish", oracleId: attestationOracleId,
+            condition: { type: "completion", field: "completed", operator: "eq", value: true },
+            releasePercentage: 100,
+          }],
+          pledgeTypes: [{ name: "Pledge", description: "Pledge", calculationType: "flat", minimum: "100" }],
+          minimumPledge: "100",
+        });
+
+        const waitFor = async (operationId: string) => {
+          for (let i = 0; i < 50; i++) {
+            const op = await as(sessions.creator).get(path(`/bulk/${operationId}`));
+            if (!["pending", "processing"].includes(op.body.status)) return op.body;
+            await new Promise((r) => setTimeout(r, 10));
+          }
+          throw new Error("bulk operation did not finish");
+        };
+
+        // Viewers may not create campaigns in bulk; unsupported types are refused
+        expect((await as(sessions.backer).post(path("/bulk"), { type: "campaign_create", inputData: [definition("x")] })).status).toBe(403);
+        expect((await as(sessions.creator).post(path("/bulk"), { type: "pledge_refund", inputData: [{}] })).status).toBe(400);
+
+        const createOp = await as(sessions.creator).post(path("/bulk"), {
+          type: "campaign_create",
+          inputData: [definition("Bulk A"), { ...definition("Bulk B"), pledgeWindowEnd: start - 1 }],
+        });
+        expect(createOp.status).toBe(202);
+        const done = await waitFor(createOp.body.id);
+        expect(done).toMatchObject({ status: "partial", successCount: 1, failureCount: 1 });
+        expect(done.errors[0]).toMatchObject({ itemIndex: 1, error: "Pledge window start must be before end" });
+
+        const campaignId = done.results[0].itemId;
+        const stored = await as(null).get(`/v1/campaigns/${campaignId}`);
+        expect(stored.body).toMatchObject({ name: "Bulk A", status: "draft" });
+        expect(stored.body.creator.toLowerCase()).toBe(creator.address.toLowerCase());
+
+        const cancelOp = await as(sessions.creator).post(path("/bulk"), {
+          type: "campaign_cancel",
+          inputData: [{ campaignId }, { campaignId: "campaign_missing" }],
+        });
+        const cancelled = await waitFor(cancelOp.body.id);
+        expect(cancelled).toMatchObject({ status: "partial", successCount: 1 });
+        expect((await as(null).get(`/v1/campaigns/${campaignId}`)).body.status).toBe("cancelled");
       });
 
       it("keeps financial reports private and reaches the scheduled list", async () => {
@@ -701,7 +824,189 @@ for (const backend of storeBackends("api_integration_test")) {
       });
     });
 
+    describe("platform events", () => {
+      let server: http.Server;
+      let hookUrl: string;
+      let deliveries: { path: string; headers: http.IncomingHttpHeaders; body: any }[];
+
+      beforeAll(async () => {
+        process.env.ALLOW_PRIVATE_WEBHOOK_TARGETS = "true";
+        deliveries = [];
+        server = http.createServer((req, res) => {
+          const chunks: Buffer[] = [];
+          req.on("data", (c) => chunks.push(c));
+          req.on("end", () => {
+            deliveries.push({ path: req.url!, headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString()) });
+            res.end("ok");
+          });
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        hookUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      });
+
+      afterAll(async () => {
+        delete process.env.ALLOW_PRIVATE_WEBHOOK_TARGETS;
+        await new Promise((resolve) => server.close(resolve));
+      });
+
+      it("reach webhooks, integrations and in-app notifications", async () => {
+        const subscribe = async (session: string, path: string) => {
+          const created = await as(session).post("/v1/webhooks", {
+            name: path,
+            url: `${hookUrl}${path}`,
+            events: ["pledge_created", "milestone_verified", "campaign_resolved"],
+          });
+          expect(created.status).toBe(201);
+          return created.body.data.id as string;
+        };
+        const hooks = [await subscribe(sessions.creator, "/creator"), await subscribe(sessions.stranger, "/stranger")];
+        const slack = await as(sessions.creator).post("/v1/integrations", {
+          type: "zapier",
+          name: "Zap",
+          config: { type: "zapier", webhookUrl: `${hookUrl}/zapier` },
+          events: ["pledge_created"],
+        });
+        expect(slack.status).toBe(201);
+
+        try {
+          const campaignId = await activeCampaign();
+          await pledge(campaignId, "500");
+          await flushEvents();
+
+          const pledged = deliveries.filter((d) => d.body.type === "pledge_created" || d.body.event === "pledge_created");
+          expect(pledged.map((d) => d.path).sort()).toEqual(["/creator", "/stranger", "/zapier"]);
+          expect(pledged.find((d) => d.path === "/creator")!.body).toMatchObject({
+            data: { campaignId, amount: "500", backerAddress: backer.address.toLowerCase() },
+          });
+
+          // The creator hears about the pledge in-app, as does the backer
+          for (const address of [creator.address, backer.address]) {
+            const inbox = notificationService.getNotifications({ recipient: address, eventType: "pledge_created" });
+            expect(inbox.map((n) => n.data.campaignId)).toContain(campaignId);
+          }
+
+          // Resolution reaches subscribers, and backers hear what happened to their pledge
+          advance(HOUR + 1);
+          const milestoneId = (await as(null).get(`/v1/campaigns/${campaignId}`)).body.milestones[0].id;
+          expect((await attest(campaignId, milestoneId, true)).status).toBe(201);
+          expect((await resolve(campaignId)).status).toBe(200);
+          await flushEvents();
+
+          expect(deliveries.filter((d) => d.body.type === "campaign_resolved").map((d) => d.path).sort()).toEqual([
+            "/creator",
+            "/stranger",
+          ]);
+          const released = notificationService.getNotifications({ recipient: backer.address, eventType: "pledge_released" });
+          expect(released.map((n) => n.data.campaignId)).toContain(campaignId);
+        } finally {
+          for (const [i, id] of hooks.entries()) {
+            await as(i === 0 ? sessions.creator : sessions.stranger).delete(`/v1/webhooks/${id}`);
+          }
+          await as(sessions.creator).delete(`/v1/integrations/${slack.body.id}`);
+        }
+      });
+
+      it("keep events about private campaigns to the creator's subscriptions", async () => {
+        const created = await as(sessions.stranger).post("/v1/webhooks", {
+          name: "Firehose",
+          url: `${hookUrl}/firehose`,
+          events: ["campaign_created"],
+        });
+        try {
+          deliveries = [];
+          const start = now();
+          const response = await as(sessions.creator).post("/v1/campaigns", {
+            name: "Private",
+            description: "Members only",
+            beneficiary: creator.address,
+            beneficiaryName: "Club",
+            pledgeWindowStart: start,
+            pledgeWindowEnd: start + HOUR,
+            resolutionDeadline: start + 24 * HOUR,
+            visibility: "private",
+            milestones: [{
+              name: "Finish", description: "Finish", oracleId: attestationOracleId,
+              condition: { type: "completion", field: "completed", operator: "eq", value: true },
+              releasePercentage: 100,
+            }],
+            pledgeTypes: [{ name: "Pledge", description: "Pledge", calculationType: "flat", minimum: "100" }],
+            minimumPledge: "100",
+          });
+          expect(response.status).toBe(201);
+          await flushEvents();
+          expect(deliveries).toEqual([]);
+        } finally {
+          await as(sessions.stranger).delete(`/v1/webhooks/${created.body.data.id}`);
+        }
+      });
+    });
+
+    describe("analytics and discovery", () => {
+      it("reflect stored campaigns and pledges", async () => {
+        const campaignId = await activeCampaign();
+        await pledge(campaignId, "500");
+        await pledge(campaignId, "300", sessions.backer2);
+
+        const search = await as(null).get("/v1/analytics/search?q=marathon&limit=100");
+        expect(search.status).toBe(200);
+        expect(search.body.data.campaigns.find((c: { id: string }) => c.id === campaignId)).toMatchObject({
+          totalPledged: "800",
+          backerCount: 2,
+          status: "active",
+        });
+
+        const trending = await as(null).get("/v1/analytics/platform/trending?limit=100");
+        const entry = trending.body.data.trending.find((t: { campaign: { id: string } }) => t.campaign.id === campaignId);
+        expect(entry.changePercent).toBe(100); // everything was pledged in the last day
+
+        expect((await as(sessions.stranger).get(`/v1/analytics/creators/${creator.address}/dashboard`)).status).toBe(403);
+        const dashboard = await as(sessions.creator).get(`/v1/analytics/creators/${creator.address}/dashboard`);
+        expect(dashboard.status).toBe(200);
+        expect(dashboard.body.data.recentCampaigns.map((c: { id: string }) => c.id)).toContain(campaignId);
+
+        const portfolio = await as(sessions.backer2).get(`/v1/analytics/backers/${backer2.address}/portfolio`);
+        expect(portfolio.status).toBe(200);
+        expect(portfolio.body.data.recentPledges[0]).toMatchObject({ campaignId, amount: "300", status: "active" });
+        expect(BigInt(portfolio.body.data.summary.pendingResolution)).toBeGreaterThanOrEqual(300n);
+      });
+
+      it("limits advanced campaign changes to the creator", async () => {
+        const campaignId = await activeCampaign();
+        await pledge(campaignId, "400");
+        const goal = { name: "Bonus", description: "", type: "amount", threshold: "300", reward: { type: "bonus", description: "" } };
+
+        expect((await as(sessions.stranger).post(`/v1/campaigns/advanced/${campaignId}/stretch-goals`, goal)).status).toBe(403);
+        expect((await as(sessions.creator).post(`/v1/campaigns/advanced/${campaignId}/stretch-goals`, goal)).status).toBe(201);
+
+        const progress = await as(null).get(`/v1/campaigns/advanced/${campaignId}/stretch-goals/progress`);
+        expect(progress.body).toMatchObject({ currentAmount: "400", currentBackers: 1 });
+        expect(progress.body.goals[0].status).toBe("achieved");
+
+        const action = { type: "close", scheduledFor: Date.now() + 1000 };
+        expect((await as(sessions.stranger).post(`/v1/campaigns/advanced/${campaignId}/schedule/action`, action)).status).toBe(403);
+        expect((await as(sessions.stranger).post("/v1/campaigns/advanced/schedule/process")).status).toBe(403);
+        expect((await as(sessions.creator).post(`/v1/campaigns/advanced/${campaignId}/schedule/action`, action)).status).toBe(201);
+
+        advance(2);
+        const processed = await as(sessions.admin).post("/v1/campaigns/advanced/schedule/process");
+        expect(processed.status).toBe(200);
+        expect((await as(null).get(`/v1/campaigns/${campaignId}`)).body.status).toBe("pledging_closed");
+      });
+    });
+
     describe("oracles", () => {
+      it("refuses API oracles pointing at internal addresses", async () => {
+        for (const endpoint of ["http://169.254.169.254/latest/meta-data/", "http://localhost:5432/", "http://10.0.0.5/api"]) {
+          const response = await as(sessions.admin).post("/v1/oracles", {
+            name: "Internal",
+            description: "",
+            type: "api",
+            endpoint,
+          });
+          expect(response.status).toBe(400);
+        }
+      });
+
       it("never exposes oracle config, which can hold credentials", async () => {
         const created = await as(sessions.admin).post("/v1/oracles", {
           name: "Timing API",

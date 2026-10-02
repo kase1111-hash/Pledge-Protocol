@@ -14,7 +14,9 @@ import {
   ArweaveConfig,
   TokenMetadata
 } from "./types";
-import { createHash } from "crypto";
+import { createHash, JsonWebKey } from "crypto";
+import { readFileSync } from "fs";
+import { createDataItem } from "./ans104";
 
 /**
  * Default configuration for storage providers
@@ -26,24 +28,47 @@ const DEFAULT_CONFIG: StorageConfig = {
   },
   arweave: {
     gateway: "https://arweave.net",
-    bundlrEndpoint: "https://node1.bundlr.network"
+    bundlrEndpoint: "https://node1.irys.xyz"
   },
-  preferredProvider: "arweave"
+  local: {
+    publicUrl: "http://localhost:3000"
+  },
+  preferredProvider: "local"
 };
 
+interface LocalAsset {
+  contentType: string;
+  /** Base64 content */
+  data: string;
+  createdAt: number;
+}
+
 /**
- * Storage provider for IPFS and Arweave
+ * Storage for token images and metadata:
+ *
+ *  - "ipfs": pinned through Pinata (API key and secret, or a JWT)
+ *  - "arweave": signed ANS-104 data items posted to an Irys/Bundlr node with
+ *    an Arweave wallet (small uploads are free; larger ones need a funded
+ *    balance on the node)
+ *  - "local": kept by this API (content-addressed, persisted with the rest
+ *    of its state) and served from /v1/commemoratives/assets/:hash, for
+ *    deployments without IPFS or Arweave credentials
+ *
+ * A provider that is requested but not configured is an error; uploads are
+ * never faked.
  */
 export class StorageService {
   private config: StorageConfig;
   private uploadCache: Map<string, StorageResult> = new Map();
+  private localAssets: Map<string, LocalAsset> = new Map();
 
   constructor(config: Partial<StorageConfig> = {}) {
     this.config = {
       ...DEFAULT_CONFIG,
       ...config,
       ipfs: { ...DEFAULT_CONFIG.ipfs, ...config.ipfs },
-      arweave: { ...DEFAULT_CONFIG.arweave, ...config.arweave }
+      arweave: { ...DEFAULT_CONFIG.arweave, ...config.arweave },
+      local: { ...DEFAULT_CONFIG.local, ...config.local }
     };
   }
 
@@ -69,10 +94,18 @@ export class StorageService {
 
     let result: StorageResult;
 
-    if (targetProvider === "ipfs") {
-      result = await this.uploadToIPFS(content, contentType);
-    } else {
-      result = await this.uploadToArweave(content, contentType);
+    switch (targetProvider) {
+      case "ipfs":
+        result = await this.uploadToIPFS(content, contentType);
+        break;
+      case "arweave":
+        result = await this.uploadToArweave(content, contentType);
+        break;
+      case "local":
+        result = this.storeLocally(content, contentType);
+        break;
+      default:
+        throw new Error(`Unknown storage provider: ${targetProvider}`);
     }
 
     // Cache the result
@@ -109,31 +142,30 @@ export class StorageService {
     content: string | Buffer,
     contentType: string
   ): Promise<StorageResult> {
-    const { apiEndpoint, apiKey, apiSecret } = this.config.ipfs;
+    const { apiEndpoint, apiKey, apiSecret, jwt } = this.config.ipfs;
 
-    if (!apiKey || !apiSecret) {
-      // Return mock result for development without API keys
-      return this.createMockIPFSResult(content);
+    let auth: Record<string, string>;
+    if (jwt) {
+      auth = { Authorization: `Bearer ${jwt}` };
+    } else if (apiKey && apiSecret) {
+      auth = { pinata_api_key: apiKey, pinata_secret_api_key: apiSecret };
+    } else {
+      throw new Error("IPFS storage is not configured (set IPFS_API_KEY and IPFS_API_SECRET, or PINATA_JWT)");
     }
 
     const buffer = typeof content === "string" ? Buffer.from(content) : content;
-    const blob = new Blob([buffer], { type: contentType });
-
     const formData = new FormData();
-    formData.append("file", blob);
+    formData.append("file", new Blob([buffer], { type: contentType }), this.hashContent(buffer));
 
     const response = await fetch(`${apiEndpoint}/pinning/pinFileToIPFS`, {
       method: "POST",
-      headers: {
-        pinata_api_key: apiKey,
-        pinata_secret_api_key: apiSecret
-      },
+      headers: auth,
       body: formData
     });
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`IPFS upload failed: ${error}`);
+      throw new Error(`IPFS upload failed: HTTP ${response.status} ${error.slice(0, 200)}`);
     }
 
     const result = (await response.json()) as { IpfsHash: string };
@@ -148,7 +180,7 @@ export class StorageService {
   }
 
   /**
-   * Upload to Arweave via Bundlr
+   * Upload to Arweave as a signed data item through an Irys/Bundlr node
    */
   private async uploadToArweave(
     content: string | Buffer,
@@ -157,29 +189,28 @@ export class StorageService {
     const { bundlrEndpoint, wallet } = this.config.arweave;
 
     if (!wallet) {
-      // Return mock result for development without wallet
-      return this.createMockArweaveResult(content);
+      throw new Error("Arweave storage is not configured (set ARWEAVE_WALLET to a JWK wallet)");
     }
 
     const buffer = typeof content === "string" ? Buffer.from(content) : content;
+    const item = createDataItem(buffer, wallet, [
+      { name: "Content-Type", value: contentType },
+      { name: "App-Name", value: "Pledge Protocol" }
+    ]);
 
-    // In production, this would use the Bundlr SDK
-    // For now, we simulate the upload
-    const response = await fetch(`${bundlrEndpoint}/tx`, {
+    const response = await fetch(`${bundlrEndpoint}/tx/arweave`, {
       method: "POST",
-      headers: {
-        "Content-Type": contentType
-      },
-      body: buffer
+      headers: { "Content-Type": "application/octet-stream" },
+      body: item.bytes
     });
 
     if (!response.ok) {
       const error = await response.text();
-      throw new Error(`Arweave upload failed: ${error}`);
+      throw new Error(`Arweave upload failed: HTTP ${response.status} ${error.slice(0, 200)}`);
     }
 
-    const result = (await response.json()) as { id: string };
-    const txId = result.id;
+    const result = (await response.json()) as { id?: string };
+    const txId = result.id || item.id;
 
     return {
       provider: "arweave",
@@ -190,33 +221,29 @@ export class StorageService {
   }
 
   /**
-   * Create mock IPFS result for development
+   * Keep content in this API, addressed by its SHA-256
    */
-  private createMockIPFSResult(content: string | Buffer): StorageResult {
-    const hash = this.hashContent(content);
-    const mockCid = `Qm${hash.substring(0, 44)}`;
+  private storeLocally(content: string | Buffer, contentType: string): StorageResult {
+    const buffer = typeof content === "string" ? Buffer.from(content) : content;
+    const hash = this.hashContent(buffer);
+    if (!this.localAssets.has(hash)) {
+      this.localAssets.set(hash, { contentType, data: buffer.toString("base64"), createdAt: Date.now() });
+    }
 
     return {
-      provider: "ipfs",
-      uri: `ipfs://${mockCid}`,
-      hash: mockCid,
+      provider: "local",
+      uri: `local://${hash}`,
+      hash,
       timestamp: Date.now()
     };
   }
 
   /**
-   * Create mock Arweave result for development
+   * Content stored with the "local" provider
    */
-  private createMockArweaveResult(content: string | Buffer): StorageResult {
-    const hash = this.hashContent(content);
-    const mockTxId = hash.substring(0, 43);
-
-    return {
-      provider: "arweave",
-      uri: `ar://${mockTxId}`,
-      hash: mockTxId,
-      timestamp: Date.now()
-    };
+  getLocalAsset(hash: string): { contentType: string; content: Buffer } | null {
+    const asset = this.localAssets.get(hash);
+    return asset ? { contentType: asset.contentType, content: Buffer.from(asset.data, "base64") } : null;
   }
 
   /**
@@ -233,6 +260,11 @@ export class StorageService {
       return `${this.config.arweave.gateway}/${txId}`;
     }
 
+    if (uri.startsWith("local://")) {
+      const hash = uri.replace("local://", "");
+      return `${this.config.local.publicUrl.replace(/\/$/, "")}/v1/commemoratives/assets/${hash}`;
+    }
+
     return uri;
   }
 
@@ -240,6 +272,9 @@ export class StorageService {
    * Verify content exists at URI
    */
   async verify(uri: string): Promise<boolean> {
+    if (uri.startsWith("local://")) {
+      return this.localAssets.has(uri.replace("local://", ""));
+    }
     try {
       const url = this.toHttpUrl(uri);
       const response = await fetch(url, { method: "HEAD" });
@@ -253,6 +288,12 @@ export class StorageService {
    * Fetch content from URI
    */
   async fetch(uri: string): Promise<Buffer> {
+    if (uri.startsWith("local://")) {
+      const asset = this.getLocalAsset(uri.replace("local://", ""));
+      if (!asset) throw new Error(`No stored content for ${uri}`);
+      return asset.content;
+    }
+
     const url = this.toHttpUrl(uri);
     const response = await fetch(url);
 
@@ -325,6 +366,45 @@ export class StorageService {
       entries: Array.from(this.uploadCache.keys())
     };
   }
+}
+
+/**
+ * Storage settings from the environment. The preferred provider is
+ * STORAGE_PROVIDER, or the first configured of Arweave, IPFS, local.
+ */
+export function storageConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Partial<StorageConfig> {
+  let wallet: JsonWebKey | undefined;
+  const rawWallet = env.ARWEAVE_WALLET || (env.ARWEAVE_WALLET_FILE ? readFileSync(env.ARWEAVE_WALLET_FILE, "utf8") : "");
+  if (rawWallet) {
+    try {
+      wallet = JSON.parse(rawWallet);
+    } catch {
+      throw new Error("ARWEAVE_WALLET must be a JWK wallet in JSON");
+    }
+  }
+
+  const ipfsConfigured = !!(env.PINATA_JWT || (env.IPFS_API_KEY && env.IPFS_API_SECRET));
+  const preferred = (env.STORAGE_PROVIDER as StorageProvider | undefined) ||
+    (wallet ? "arweave" : ipfsConfigured ? "ipfs" : "local");
+
+  return {
+    ipfs: {
+      gateway: env.IPFS_GATEWAY || DEFAULT_CONFIG.ipfs.gateway,
+      apiEndpoint: env.IPFS_API_URL || DEFAULT_CONFIG.ipfs.apiEndpoint,
+      apiKey: env.IPFS_API_KEY,
+      apiSecret: env.IPFS_API_SECRET,
+      jwt: env.PINATA_JWT
+    },
+    arweave: {
+      gateway: env.ARWEAVE_GATEWAY || DEFAULT_CONFIG.arweave.gateway,
+      bundlrEndpoint: env.BUNDLER_URL || DEFAULT_CONFIG.arweave.bundlrEndpoint,
+      wallet
+    },
+    local: {
+      publicUrl: /^https?:\/\//.test(env.BASE_URL ?? "") ? env.BASE_URL! : `http://localhost:${env.PORT || 3000}`
+    },
+    preferredProvider: preferred
+  };
 }
 
 /**
@@ -401,5 +481,5 @@ export class BatchUploader {
 }
 
 // Export singleton instance
-export const storageService = new StorageService();
+export const storageService = new StorageService(storageConfigFromEnv());
 export const batchUploader = new BatchUploader(storageService);

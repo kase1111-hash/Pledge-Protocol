@@ -66,10 +66,12 @@ class MemorySession implements StoreSession {
 
   async listCampaigns(query: CampaignQuery = {}): Promise<Page<Campaign>> {
     const creator = query.creator?.toLowerCase();
+    const beneficiary = query.beneficiary?.toLowerCase();
     const matches = Array.from(this.tables.campaigns.values())
       .filter((c) => !query.status || c.status === query.status)
       .filter((c) => !query.visibility || c.visibility === query.visibility)
       .filter((c) => !creator || c.creator.toLowerCase() === creator)
+      .filter((c) => !beneficiary || c.beneficiary.toLowerCase() === beneficiary)
       .sort(byNewest);
     return copy(page(matches, query.limit, query.offset));
   }

@@ -31,6 +31,7 @@ import integrationRoutes from "./routes/integrations";
 import i18nRoutes from "./routes/i18n";
 import campaignsAdvancedRoutes from "./routes/campaigns-advanced";
 import { persistBeforeResponse, registerPersistentState } from "./persistence";
+import { invalidateSearchIndex } from "../discovery";
 
 // Phase 7: Security middleware
 import {
@@ -91,6 +92,12 @@ app.use(requestLoggerMiddleware);
 
 // Store state changes before answering requests that make them
 app.use(persistBeforeResponse);
+
+// Discovery is rebuilt from the store after anything that may have changed it
+app.use((req, res, next) => {
+  if (req.method !== "GET" && req.method !== "HEAD") res.on("finish", invalidateSearchIndex);
+  next();
+});
 
 // Rate limiting (applies to all routes)
 app.use(rateLimitMiddleware());

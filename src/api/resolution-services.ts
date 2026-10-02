@@ -4,6 +4,7 @@
 
 import { ResolutionEngine, WebhookHandler, oracleRouter } from "../oracle";
 import { StoreResolutionDataProvider } from "./resolution-provider";
+import { resolutionEvents } from "../events";
 
 export const dataProvider = new StoreResolutionDataProvider();
 export const resolutionEngine = new ResolutionEngine(oracleRouter, dataProvider);
@@ -14,4 +15,8 @@ resolutionEngine.on("resolution:failed", (job) => {
   if (!job.errorCode) {
     console.error(`Resolution failed: ${job.id}`, job.error);
   }
+});
+
+resolutionEngine.on("resolution:completed", (job) => {
+  resolutionEvents(job.campaignId);
 });

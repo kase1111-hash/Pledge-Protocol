@@ -6,7 +6,13 @@
 /**
  * Campaign status for search
  */
-export type CampaignStatus = "draft" | "active" | "resolved" | "cancelled" | "expired";
+export type CampaignStatus =
+  | "draft"
+  | "active"
+  | "pledging_closed"
+  | "resolved"
+  | "cancelled"
+  | "expired";
 
 /**
  * Campaign category
@@ -38,6 +44,8 @@ export interface CampaignIndexEntry {
 
   // Metrics
   totalPledged: bigint;
+  /** Amount pledged in the last 24 hours */
+  pledgedLastDay?: bigint;
   goalAmount?: bigint;
   backerCount: number;
   pledgeCount: number;
@@ -173,6 +181,27 @@ export class SearchService {
   }
 
   /**
+   * Replace the whole index, keeping views, shares and featured flags for
+   * campaigns that are still present
+   */
+  replaceAll(campaigns: CampaignIndexEntry[]): void {
+    const next = new Map<string, CampaignIndexEntry>();
+    for (const campaign of campaigns) {
+      const previous = this.index.get(campaign.id);
+      if (previous) {
+        campaign.viewCount = previous.viewCount;
+        campaign.shareCount = previous.shareCount;
+        campaign.featuredAt = previous.featuredAt;
+      }
+      campaign.keywords = this.extractKeywords(campaign);
+      campaign.trendingScore = this.calculateTrendingScore(campaign);
+      next.set(campaign.id, campaign);
+    }
+    this.index = next;
+    this.trendingCache = [];
+  }
+
+  /**
    * Update campaign in index
    */
   updateCampaign(campaignId: string, updates: Partial<CampaignIndexEntry>): void {
@@ -264,7 +293,7 @@ export class SearchService {
     this.trendingCache = campaigns.map((campaign) => ({
       campaign,
       trendingReason: this.getTrendingReason(campaign),
-      changePercent: Math.random() * 50 + 10, // Simulated change
+      changePercent: this.dailyChangePercent(campaign),
       timeFrame: "24h",
     }));
     this.trendingCacheTime = now;
@@ -395,6 +424,7 @@ export class SearchService {
     const byStatus: Record<CampaignStatus, number> = {
       draft: 0,
       active: 0,
+      pledging_closed: 0,
       resolved: 0,
       cancelled: 0,
       expired: 0,
@@ -595,6 +625,7 @@ export class SearchService {
     const statuses: Record<CampaignStatus, number> = {
       draft: 0,
       active: 0,
+      pledging_closed: 0,
       resolved: 0,
       cancelled: 0,
       expired: 0,
@@ -708,6 +739,18 @@ export class SearchService {
       (pledgeScore + backerScore + viewScore + shareScore + featuredBonus + progressBonus) *
       (0.5 + recencyFactor * 0.5)
     );
+  }
+
+  /**
+   * Growth in pledged funds over the last 24 hours, relative to what was
+   * pledged before
+   */
+  private dailyChangePercent(campaign: CampaignIndexEntry): number {
+    const recent = campaign.pledgedLastDay ?? 0n;
+    const before = campaign.totalPledged - recent;
+    if (recent === 0n) return 0;
+    if (before <= 0n) return 100;
+    return Number((recent * 10000n) / before) / 100;
   }
 
   private getTrendingReason(campaign: CampaignIndexEntry): string {

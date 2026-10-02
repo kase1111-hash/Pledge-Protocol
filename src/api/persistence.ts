@@ -12,7 +12,7 @@ import { getStore, persistence, DomainStore } from "../database";
 import { authService } from "../security/auth-service";
 import { logger } from "../security/audit-logger";
 import { disputeService } from "../governance";
-import { commemorativeService, pledgeTokenService } from "../tokens";
+import { commemorativeService, pledgeTokenService, storageService } from "../tokens";
 import { socialService } from "../social";
 import { notificationService } from "../notifications";
 import { notificationService as notificationServiceV2 } from "../notifications-v2";
@@ -60,6 +60,7 @@ export function registerPersistentState(): void {
     "recordsByBacker",
   ]);
   bindMaps("pledgeTokens", pledgeTokenService, ["pledgeMetadata"]);
+  bindMaps("storage", storageService, ["localAssets", "uploadCache"]);
 
   bindMaps("social", socialService, ["profiles", "follows", "comments", "activities", "badges"]);
 
@@ -69,13 +70,14 @@ export function registerPersistentState(): void {
     "preferences",
     "notifications",
     "inAppNotifications",
+    "digestsSentAt",
   ]);
 
   // Payments: checkout sessions are indexed by our own session IDs, so the
   // index is needed to find a provider's session after a restart
   const providers = (paymentProcessor as unknown as Fields).providers as Map<string, object>;
   for (const [name, provider] of providers) {
-    bindMaps(`payments.${name}`, provider, ["sessionIndex"]);
+    bindMaps(`payments.${name}`, provider, "subscriptions" in provider ? ["sessionIndex", "subscriptions"] : ["sessionIndex"]);
   }
   const settlements = (paymentProcessor as unknown as Fields).settlementService as object;
   bindMaps("settlements", settlements, ["settlements", "batches"]);
@@ -100,7 +102,7 @@ export function registerPersistentState(): void {
     "consentRecords",
     "gdprRequests",
     "ccpaRequests",
-    "userData",
+    "exportFiles",
   ]);
 
   bindMaps("risk", fraudDetector, [

@@ -233,9 +233,16 @@ NODE_ENV=production npm run api:start
 ```
 
 - **Storage.** With `DATABASE_TYPE=postgresql` the schema is created and migrated on startup, and the server refuses to start if the database is unreachable. `DATABASE_TYPE=memory` is for development only.
-- **What is stored where.** Campaigns, pledges, oracles and attestations live in their own tables with row locking. All other service state (sessions and roles, disputes, payments, social data, notifications, organizations, compliance records, scheduled resolutions, jobs, …) is loaded into memory at startup and written back before the API answers any request that changed it. That design assumes **a single API instance**; running several against one database would let their in-memory copies diverge.
+- **What is stored where.** Campaigns, pledges, oracles and attestations live in their own tables with row locking. All other service state (sessions and roles, disputes, payments, social data, notifications, organizations, compliance records, scheduled resolutions, jobs, …) is loaded into memory at startup and written back before the API answers any request that changed it. Because of that, **only one API instance may run per database (and schema)**: the server holds a PostgreSQL advisory lock while it runs, and a second instance refuses to start.
 - **Access.** Sign in with a wallet signature (`/v1/auth/challenge`, `/v1/auth/verify`) and send the session as `Authorization: Bearer <sessionId>`. `ADMIN_ADDRESSES` bootstraps administrators, who can grant roles (`arbitrator`, `creator`, …) through `/v1/auth/roles/:address`.
-- **Webhooks** are only delivered to public addresses; set `ALLOW_PRIVATE_WEBHOOK_TARGETS=true` for local development.
+- **Events.** Campaign, pledge, milestone, resolution and dispute changes are published to subscribed webhooks, integrations and in-app notifications after they are stored. Events about campaigns that are not public only reach the creator's subscriptions.
+- **Outbound requests.** Webhooks, integrations and API oracle endpoints are only called on public addresses (checked after DNS resolution, no redirects); set `ALLOW_PRIVATE_WEBHOOK_TARGETS=true` for local development.
+- **Integrations** that use OAuth need the provider's client credentials (`SLACK_CLIENT_ID`/`SLACK_CLIENT_SECRET`, `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`) and `BASE_URL`, the public URL of this API, for the OAuth callback.
+- **Notifications** go out through SendGrid or Mailgun (email), Firebase or OneSignal (push) and Twilio (SMS); a channel without credentials fails with an explanatory error rather than pretending to deliver.
+- **Exchange rates** come from CoinGecko. Fiat settlements are refused when no rate from the last ten minutes is available; displayed conversions accept rates up to a day old.
+- **Commemorative storage** uses Pinata (IPFS) or an Irys/Bundlr node (Arweave, signed ANS-104 data items) when configured; otherwise the API keeps the files itself and serves them from `/v1/commemoratives/assets/:hash`.
+- **Organization bulk operations** support `campaign_create`, `campaign_cancel`, `member_invite` and `member_remove`; campaign items go through the same validation and escrow refunds as the campaign routes and need the matching team permission.
+- **Background work.** Scheduled resolutions, scheduled reports, scheduled campaign actions (launch, close, reminders, milestone checks), queued notifications and digests, and confirmed data deletions run inside the API process.
 
 See `.env.example` for every setting.
 
@@ -968,7 +975,14 @@ POST /v1/compliance/export
   "includeMetadata": true
 }
 
-# Request data deletion (GDPR Article 17)
+# Export status, then the file with your data from every service
+GET /v1/compliance/export/:requestId
+GET /v1/compliance/export/:requestId/download
+
+# Request data deletion (GDPR Article 17). After confirmation and a grace
+# period, profile, social, preference and notification data is erased;
+# escrow, payment and audit records are kept for legal reasons (pledges lose
+# the backer's display name) and reported as retained.
 POST /v1/compliance/delete
 {
   "address": "0x...",
@@ -1435,79 +1449,34 @@ USD, EUR, GBP, JPY, CNY, KRW, BRL, MXN, INR, AUD, CAD, CHF, USDC, ETH
 Financial reports, tax documents, and data exports:
 
 ```bash
-# Generate report
-POST /v1/reports
-{
-  "type": "financial_summary",
-  "userId": "user_123",
-  "dateRange": {
-    "start": "2025-01-01",
-    "end": "2025-12-31"
-  },
-  "format": "pdf"
-}
+# Reports are built from your stored campaigns and pledges. Amounts are ETH;
+# fees, goals and referrals are not tracked yet and report as zero.
+GET /v1/reports/financial/:address?period=month       # as creator
+GET /v1/reports/transactions/:address?minAmount=0.5   # as backer and beneficiary
+GET /v1/reports/payouts/:address?period=year          # as beneficiary
+GET /v1/reports/tax/:address/2025
+POST /v1/reports/tax/:address/form   { "formType": "1099-MISC", "year": 2025 }   # draft figures
+GET /v1/reports/campaigns/:campaignId/performance     # creator or admin
+GET /v1/reports/backers/:address/activity
+GET /v1/reports/audit/:entityType/:entityId           # campaign, pledge, dispute or user
 
-# Get report status
+# Report files (json, csv, pdf or xlsx), generated in the background
+POST /v1/reports/generate
+{ "type": "financial_summary", "format": "pdf", "period": { "type": "year" } }
 GET /v1/reports/:reportId
-
-# List user reports
-GET /v1/reports?userId=user_123&type=tax_summary
-
-# Download report
 GET /v1/reports/:reportId/download
 
-# Get financial summary
-GET /v1/reports/financial/:userId?year=2025
+# Export your campaigns, pledges or transactions
+POST /v1/reports/exports   { "dataType": "pledges", "format": "csv" }
+GET /v1/reports/exports/:exportId
+GET /v1/reports/exports/:exportId/download
 
-# Get transaction history
-GET /v1/reports/transactions/:userId?limit=100&offset=0
-
-# Get tax summary
-GET /v1/reports/tax/:userId?year=2025
-
-# Generate tax form
-POST /v1/reports/tax/:userId/form
-{
-  "formType": "1099-MISC",
-  "year": 2025
-}
-
-# Get campaign performance report
-GET /v1/reports/campaign/:campaignId
-
-# Get backer activity report
-GET /v1/reports/backer/:userId
-
-# Get audit trail
-GET /v1/reports/audit/:entityType/:entityId?limit=100
-
-# Export data
-POST /v1/reports/export
-{
-  "type": "campaigns",
-  "userId": "user_123",
-  "format": "csv",
-  "filters": {
-    "status": "resolved",
-    "dateRange": { "start": "2025-01-01", "end": "2025-12-31" }
-  }
-}
-
-# Schedule recurring report
+# Scheduled reports run inside the API process when due
 POST /v1/reports/scheduled
-{
-  "userId": "user_123",
-  "type": "financial_summary",
-  "frequency": "monthly",
-  "format": "pdf",
-  "deliveryMethod": "email"
-}
-
-# List scheduled reports
-GET /v1/reports/scheduled?userId=user_123
-
-# Cancel scheduled report
-DELETE /v1/reports/scheduled/:scheduleId
+{ "name": "Monthly", "type": "financial_summary", "format": "pdf",
+  "frequency": "monthly", "dayOfMonth": 1, "time": "08:00", "timezone": "UTC", "recipients": [] }
+GET /v1/reports/scheduled
+DELETE /v1/reports/scheduled/:reportId
 ```
 
 #### Report Types
@@ -1534,78 +1503,40 @@ DELETE /v1/reports/scheduled/:scheduleId
 
 ### Integrations API (Phase 10)
 
-Third-party integrations with Slack, Discord, Zapier, and more:
+Send campaign activity to Slack, Discord, Zapier, Telegram or your own HTTP endpoint. Every route except the catalogs and the OAuth callback needs a session and acts on your own integrations:
 
 ```bash
-# List integrations
-GET /v1/integrations?userId=user_123
+# Catalogs
+GET /v1/integrations/available
+GET /v1/integrations/events
 
-# Get integration details
-GET /v1/integrations/:integrationId
+# Connect Slack, Discord or Google Calendar: open the returned URL; the
+# provider sends the user back to /v1/integrations/oauth/callback
+GET /v1/integrations/oauth/slack/url?returnUrl=/settings
 
-# Create integration
+# Or create one directly (webhook URLs must be public)
 POST /v1/integrations
 {
-  "userId": "user_123",
-  "type": "slack",
-  "name": "Team Notifications",
-  "config": {
-    "workspaceId": "T12345678",
-    "channelId": "C12345678"
-  },
-  "events": ["campaign_created", "milestone_verified"]
+  "type": "webhook",
+  "name": "Ops",
+  "config": { "type": "webhook", "url": "https://ops.example.com/pledges", "secret": "s3cret" },
+  "events": ["pledge_created", "campaign_resolved"],
+  "filters": { "campaignIds": ["campaign_1"], "minAmount": "1000000000000000000" }
 }
 
-# Update integration
-PUT /v1/integrations/:integrationId
-{
-  "events": ["pledge_released", "campaign_resolved"],
-  "active": true
-}
-
-# Delete integration
+GET    /v1/integrations                    # yours
+GET    /v1/integrations/stats
+GET    /v1/integrations/:integrationId
+PUT    /v1/integrations/:integrationId     # name, events, filters, status
 DELETE /v1/integrations/:integrationId
-
-# Start OAuth flow
-POST /v1/integrations/oauth/start
-{
-  "type": "slack",
-  "userId": "user_123",
-  "redirectUri": "https://myapp.com/callback"
-}
-
-# Handle OAuth callback
-POST /v1/integrations/oauth/callback
-{
-  "state": "oauth_state_token",
-  "code": "authorization_code"
-}
-
-# Send message via integration
-POST /v1/integrations/:integrationId/message
-{
-  "eventType": "campaign_created",
-  "data": {
-    "campaignId": "campaign_123",
-    "campaignName": "Portland Marathon",
-    "creatorName": "Sarah Chen"
-  }
-}
-
-# Test integration
-POST /v1/integrations/:integrationId/test
-
-# Broadcast event to all integrations
-POST /v1/integrations/broadcast
-{
-  "userId": "user_123",
-  "eventType": "milestone_verified",
-  "data": { ... }
-}
-
-# Get integration stats
-GET /v1/integrations/stats?userId=user_123
+POST   /v1/integrations/:integrationId/test
+POST   /v1/integrations/:integrationId/send   # { "eventType", "data" }
+POST   /v1/integrations/broadcast             # { "eventType", "data" } to all of yours
 ```
+
+Platform events (new pledges, milestone decisions, resolutions, disputes, …) are delivered automatically to every connected integration subscribed to them whose filters match; events about campaigns that are not public only reach the campaign creator's integrations. Amounts (`amount`, `minAmount`) are in wei.
+
+Custom webhooks with a `secret` carry `X-Pledge-Timestamp` and `X-Pledge-Signature: sha256=<hex>`, an HMAC-SHA256 of `<timestamp>.<raw body>` with the secret.
 
 #### Integration Types
 

@@ -196,6 +196,19 @@ export class PaymentProcessor {
     throw this.createError("processing_error", "Session not found");
   }
 
+  /**
+   * A backer's checkout sessions across providers, newest first
+   */
+  listCheckoutsForBacker(backerAddress: string): CheckoutSession[] {
+    const backer = backerAddress.toLowerCase();
+    const sessions: CheckoutSession[] = [];
+    for (const provider of this.providers.values()) {
+      const list = (provider as { listCheckouts?: () => CheckoutSession[] }).listCheckouts?.() ?? [];
+      sessions.push(...list.filter((s) => s.backerAddress.toLowerCase() === backer));
+    }
+    return sessions.sort((a, b) => b.createdAt - a.createdAt);
+  }
+
   async expireCheckout(
     sessionId: string,
     provider?: PaymentProvider
@@ -327,6 +340,15 @@ export class PaymentProcessor {
     // Subscriptions are Stripe-only
     const provider = this.getProvider("stripe");
     return provider.createSubscription(request);
+  }
+
+  /** A subscription created through any provider */
+  getSubscription(subscriptionId: string): Subscription | undefined {
+    for (const provider of this.providers.values()) {
+      const found = (provider as { getSubscription?: (id: string) => Subscription | undefined }).getSubscription?.(subscriptionId);
+      if (found) return found;
+    }
+    return undefined;
   }
 
   async cancelSubscription(

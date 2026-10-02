@@ -193,6 +193,11 @@ export class NotificationService {
       // Must be subscribed to event type
       if (!webhook.events.includes(event.type)) return false;
 
+      // Restricted events only reach their audience's webhooks
+      if (event.audience && !event.audience.some((a) => a.toLowerCase() === webhook.createdBy.toLowerCase())) {
+        return false;
+      }
+
       // Filter by campaign if specified
       if (webhook.campaignIds && webhook.campaignIds.length > 0) {
         if (!event.campaignId || !webhook.campaignIds.includes(event.campaignId)) {
@@ -202,7 +207,8 @@ export class NotificationService {
 
       // Filter by address if specified
       if (webhook.addresses && webhook.addresses.length > 0) {
-        if (!event.actorAddress || !webhook.addresses.includes(event.actorAddress)) {
+        const actor = event.actorAddress?.toLowerCase();
+        if (!actor || !webhook.addresses.some((a) => a.toLowerCase() === actor)) {
           return false;
         }
       }
@@ -402,6 +408,10 @@ export class NotificationService {
    * Get recipients for a notification event
    */
   private getNotificationRecipients(event: NotificationEvent): string[] {
+    if (event.recipients) {
+      return Array.from(new Set(event.recipients));
+    }
+
     const recipients: string[] = [];
 
     // Add actor if relevant
@@ -427,7 +437,8 @@ export class NotificationService {
     let notifications = Array.from(this.notifications.values());
 
     if (filters.recipient) {
-      notifications = notifications.filter((n) => n.recipient === filters.recipient);
+      const recipient = filters.recipient.toLowerCase();
+      notifications = notifications.filter((n) => n.recipient.toLowerCase() === recipient);
     }
 
     if (filters.eventType) {
@@ -479,7 +490,7 @@ export class NotificationService {
     let count = 0;
 
     for (const notification of this.notifications.values()) {
-      if (notification.recipient === recipient && notification.status !== "read") {
+      if (notification.recipient.toLowerCase() === recipient.toLowerCase() && notification.status !== "read") {
         notification.status = "read";
         notification.readAt = Date.now();
         this.notifications.set(notification.id, notification);
@@ -497,7 +508,7 @@ export class NotificationService {
     let count = 0;
 
     for (const notification of this.notifications.values()) {
-      if (notification.recipient === recipient && notification.status !== "read") {
+      if (notification.recipient.toLowerCase() === recipient.toLowerCase() && notification.status !== "read") {
         count++;
       }
     }
@@ -547,6 +558,32 @@ export class NotificationService {
   /**
    * Get notification statistics
    */
+  // ==========================================================================
+  // PERSONAL DATA (GDPR)
+  // ==========================================================================
+
+  /** A user's notification preferences and the notifications sent to them */
+  exportUser(address: string): { preferences: NotificationPreferences | null; notifications: Notification[] } {
+    const user = address.toLowerCase();
+    return {
+      preferences: Array.from(this.preferences.entries()).find(([a]) => a.toLowerCase() === user)?.[1] ?? null,
+      notifications: Array.from(this.notifications.values()).filter((n) => n.recipient.toLowerCase() === user),
+    };
+  }
+
+  /** Delete a user's preferences and notifications; returns records removed */
+  eraseUser(address: string): number {
+    const user = address.toLowerCase();
+    let deleted = 0;
+    for (const key of Array.from(this.preferences.keys())) {
+      if (key.toLowerCase() === user && this.preferences.delete(key)) deleted++;
+    }
+    for (const [id, notification] of Array.from(this.notifications.entries())) {
+      if (notification.recipient.toLowerCase() === user && this.notifications.delete(id)) deleted++;
+    }
+    return deleted;
+  }
+
   getStatistics(): {
     totalNotifications: number;
     byStatus: Record<NotificationStatus, number>;

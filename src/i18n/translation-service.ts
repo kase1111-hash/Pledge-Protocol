@@ -22,6 +22,10 @@ import {
   LocaleStats,
   TranslationProgress,
 } from "./types";
+import { PriceFeed, priceFeed } from "../payments/price-feed";
+
+/** Oldest market rate shown to users */
+const DISPLAY_RATE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
 // ============================================================================
 // LOCALE CONFIGURATIONS
@@ -179,20 +183,20 @@ const LOCALE_CONFIGS: Record<SupportedLocale, LocaleConfig> = {
 // ============================================================================
 
 const CURRENCY_CONFIGS: Record<SupportedCurrency, CurrencyConfig> = {
-  USD: { code: "USD", name: "US Dollar", symbol: "$", decimals: 2, isCrypto: false, exchangeRates: { USD: 1 } },
-  EUR: { code: "EUR", name: "Euro", symbol: "€", decimals: 2, isCrypto: false, exchangeRates: { USD: 1.08 } },
-  GBP: { code: "GBP", name: "British Pound", symbol: "£", decimals: 2, isCrypto: false, exchangeRates: { USD: 1.27 } },
-  JPY: { code: "JPY", name: "Japanese Yen", symbol: "¥", decimals: 0, isCrypto: false, exchangeRates: { USD: 0.0067 } },
-  CNY: { code: "CNY", name: "Chinese Yuan", symbol: "¥", decimals: 2, isCrypto: false, exchangeRates: { USD: 0.14 } },
-  KRW: { code: "KRW", name: "South Korean Won", symbol: "₩", decimals: 0, isCrypto: false, exchangeRates: { USD: 0.00075 } },
-  BRL: { code: "BRL", name: "Brazilian Real", symbol: "R$", decimals: 2, isCrypto: false, exchangeRates: { USD: 0.20 } },
-  CAD: { code: "CAD", name: "Canadian Dollar", symbol: "C$", decimals: 2, isCrypto: false, exchangeRates: { USD: 0.74 } },
-  AUD: { code: "AUD", name: "Australian Dollar", symbol: "A$", decimals: 2, isCrypto: false, exchangeRates: { USD: 0.65 } },
-  CHF: { code: "CHF", name: "Swiss Franc", symbol: "CHF", decimals: 2, isCrypto: false, exchangeRates: { USD: 1.12 } },
-  INR: { code: "INR", name: "Indian Rupee", symbol: "₹", decimals: 2, isCrypto: false, exchangeRates: { USD: 0.012 } },
-  MXN: { code: "MXN", name: "Mexican Peso", symbol: "MX$", decimals: 2, isCrypto: false, exchangeRates: { USD: 0.058 } },
-  USDC: { code: "USDC", name: "USD Coin", symbol: "USDC", decimals: 6, isCrypto: true, exchangeRates: { USD: 1 } },
-  ETH: { code: "ETH", name: "Ethereum", symbol: "Ξ", decimals: 18, isCrypto: true, exchangeRates: { USD: 3200 } },
+  USD: { code: "USD", name: "US Dollar", symbol: "$", decimals: 2, isCrypto: false },
+  EUR: { code: "EUR", name: "Euro", symbol: "€", decimals: 2, isCrypto: false },
+  GBP: { code: "GBP", name: "British Pound", symbol: "£", decimals: 2, isCrypto: false },
+  JPY: { code: "JPY", name: "Japanese Yen", symbol: "¥", decimals: 0, isCrypto: false },
+  CNY: { code: "CNY", name: "Chinese Yuan", symbol: "¥", decimals: 2, isCrypto: false },
+  KRW: { code: "KRW", name: "South Korean Won", symbol: "₩", decimals: 0, isCrypto: false },
+  BRL: { code: "BRL", name: "Brazilian Real", symbol: "R$", decimals: 2, isCrypto: false },
+  CAD: { code: "CAD", name: "Canadian Dollar", symbol: "C$", decimals: 2, isCrypto: false },
+  AUD: { code: "AUD", name: "Australian Dollar", symbol: "A$", decimals: 2, isCrypto: false },
+  CHF: { code: "CHF", name: "Swiss Franc", symbol: "CHF", decimals: 2, isCrypto: false },
+  INR: { code: "INR", name: "Indian Rupee", symbol: "₹", decimals: 2, isCrypto: false },
+  MXN: { code: "MXN", name: "Mexican Peso", symbol: "MX$", decimals: 2, isCrypto: false },
+  USDC: { code: "USDC", name: "USD Coin", symbol: "USDC", decimals: 6, isCrypto: true },
+  ETH: { code: "ETH", name: "Ethereum", symbol: "Ξ", decimals: 18, isCrypto: true },
 };
 
 // ============================================================================
@@ -517,7 +521,7 @@ export class TranslationService {
   private currentLocale: SupportedLocale = "en";
   private bundles: Map<string, TranslationBundle> = new Map();
   private userPreferences: Map<string, UserLocalePreferences> = new Map();
-  private exchangeRates: Map<string, ExchangeRate> = new Map();
+  private priceFeed: PriceFeed = priceFeed;
 
   constructor(options?: { defaultLocale?: SupportedLocale }) {
     if (options?.defaultLocale) {
@@ -678,37 +682,7 @@ export class TranslationService {
     count: number,
     locale: SupportedLocale
   ): "zero" | "one" | "two" | "few" | "many" | "other" {
-    const absCount = Math.abs(count);
-
-    // Simplified plural rules (use Intl.PluralRules in production)
-    switch (locale) {
-      case "ar":
-        if (count === 0) return "zero";
-        if (count === 1) return "one";
-        if (count === 2) return "two";
-        if (count % 100 >= 3 && count % 100 <= 10) return "few";
-        if (count % 100 >= 11) return "many";
-        return "other";
-
-      case "ru":
-        if (absCount % 10 === 1 && absCount % 100 !== 11) return "one";
-        if (
-          absCount % 10 >= 2 &&
-          absCount % 10 <= 4 &&
-          (absCount % 100 < 10 || absCount % 100 >= 20)
-        )
-          return "few";
-        return "many";
-
-      case "ja":
-      case "zh":
-      case "zh-TW":
-      case "ko":
-        return "other"; // No plural forms
-
-      default:
-        return count === 1 ? "one" : "other";
-    }
+    return new Intl.PluralRules(locale).select(count);
   }
 
   private interpolate(
@@ -904,51 +878,37 @@ export class TranslationService {
     return Object.values(CURRENCY_CONFIGS);
   }
 
-  getExchangeRate(
+  /**
+   * Market rate from the price feed (up to a day old for display purposes);
+   * null when no rate is available
+   */
+  async getExchangeRate(
     from: SupportedCurrency,
     to: SupportedCurrency
-  ): ExchangeRate | null {
+  ): Promise<ExchangeRate | null> {
     if (from === to) {
       return { from, to, rate: 1, source: "identity", timestamp: Date.now() };
     }
-
-    const cached = this.exchangeRates.get(`${from}:${to}`);
-    if (cached && Date.now() - cached.timestamp < 60 * 60 * 1000) {
-      return cached;
-    }
-
-    // Calculate rate via USD
-    const fromConfig = CURRENCY_CONFIGS[from];
-    const toConfig = CURRENCY_CONFIGS[to];
-
-    if (!fromConfig || !toConfig) {
+    if (!CURRENCY_CONFIGS[from] || !CURRENCY_CONFIGS[to]) {
       return null;
     }
 
-    const fromToUsd = fromConfig.exchangeRates.USD;
-    const usdToTo = 1 / toConfig.exchangeRates.USD;
-    const rate = fromToUsd * usdToTo;
-
-    const exchangeRate: ExchangeRate = {
-      from,
-      to,
-      rate,
-      source: "calculated",
-      timestamp: Date.now(),
-    };
-
-    this.exchangeRates.set(`${from}:${to}`, exchangeRate);
-    return exchangeRate;
+    try {
+      const { rate, fetchedAt } = await this.priceFeed.rate(from, to, DISPLAY_RATE_MAX_AGE_MS);
+      return { from, to, rate, source: "coingecko", timestamp: fetchedAt };
+    } catch {
+      return null;
+    }
   }
 
-  convertCurrency(
+  async convertCurrency(
     amount: number,
     from: SupportedCurrency,
     to: SupportedCurrency
-  ): { amount: number; rate: number } {
-    const exchangeRate = this.getExchangeRate(from, to);
+  ): Promise<{ amount: number; rate: number }> {
+    const exchangeRate = await this.getExchangeRate(from, to);
     if (!exchangeRate) {
-      throw new Error(`Cannot convert ${from} to ${to}`);
+      throw new Error(`Cannot convert ${from} to ${to}: no exchange rate available`);
     }
 
     return {
@@ -960,6 +920,22 @@ export class TranslationService {
   // ==========================================================================
   // USER PREFERENCES
   // ==========================================================================
+
+  /** Stored locale preferences, without creating defaults */
+  exportUser(address: string): UserLocalePreferences | null {
+    const user = address.toLowerCase();
+    return Array.from(this.userPreferences.entries()).find(([a]) => a.toLowerCase() === user)?.[1] ?? null;
+  }
+
+  /** Delete a user's locale preferences; returns records removed */
+  eraseUser(address: string): number {
+    const user = address.toLowerCase();
+    let deleted = 0;
+    for (const key of Array.from(this.userPreferences.keys())) {
+      if (key.toLowerCase() === user && this.userPreferences.delete(key)) deleted++;
+    }
+    return deleted;
+  }
 
   getUserPreferences(address: string): UserLocalePreferences {
     let prefs = this.userPreferences.get(address);

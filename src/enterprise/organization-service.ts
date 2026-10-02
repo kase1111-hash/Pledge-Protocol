@@ -4,7 +4,7 @@
  * Enterprise organization management, teams, SSO, and bulk operations.
  */
 
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
   Organization,
   OrganizationType,
@@ -28,6 +28,7 @@ import {
   Invoice,
   BulkOperation,
   BulkOperationType,
+  BulkOperationHandler,
   BulkOperationStatus,
   BulkOperationError,
   OrganizationApiKey,
@@ -47,6 +48,7 @@ export class OrganizationService {
   private bulkOperations: Map<string, BulkOperation> = new Map();
   private apiKeys: Map<string, OrganizationApiKey[]> = new Map();
   private auditLogs: Map<string, OrganizationAuditLog[]> = new Map();
+  private bulkHandlers: Partial<Record<BulkOperationType, BulkOperationHandler>> = {};
 
   // User to org mapping
   private userOrgs: Map<string, string[]> = new Map(); // userAddress -> orgIds
@@ -638,6 +640,21 @@ export class OrganizationService {
   // BULK OPERATIONS
   // ==========================================================================
 
+  /**
+   * Register how campaign-level bulk items are carried out (the API layer
+   * provides campaign creation and cancellation)
+   */
+  setBulkHandlers(handlers: Partial<Record<BulkOperationType, BulkOperationHandler>>): void {
+    this.bulkHandlers = { ...this.bulkHandlers, ...handlers };
+  }
+
+  /** Bulk operation types that can be run */
+  supportedBulkOperations(): BulkOperationType[] {
+    return Array.from(
+      new Set<BulkOperationType>(["member_invite", "member_remove", ...(Object.keys(this.bulkHandlers) as BulkOperationType[])])
+    );
+  }
+
   createBulkOperation(
     orgId: string,
     params: {
@@ -646,6 +663,15 @@ export class OrganizationService {
       createdBy: string;
     }
   ): BulkOperation {
+    if (!this.supportedBulkOperations().includes(params.type)) {
+      throw new Error(
+        `"${params.type}" bulk operations are not supported (supported: ${this.supportedBulkOperations().join(", ")})`
+      );
+    }
+    if (!Array.isArray(params.inputData) || params.inputData.length === 0) {
+      throw new Error("inputData must be a non-empty array");
+    }
+
     const operationId = `bulk_${randomUUID().replace(/-/g, "")}`;
     const now = Date.now();
 
@@ -660,6 +686,7 @@ export class OrganizationService {
       successCount: 0,
       failureCount: 0,
       errors: [],
+      results: [],
       createdAt: now,
       createdBy: params.createdBy,
     };
@@ -667,7 +694,7 @@ export class OrganizationService {
     this.bulkOperations.set(operationId, operation);
 
     // Process asynchronously
-    this.processBulkOperation(operationId);
+    void this.processBulkOperation(operationId);
 
     return operation;
   }
@@ -683,23 +710,42 @@ export class OrganizationService {
       const item = operation.inputData![i];
 
       try {
-        // Process based on type
+        let itemId: string | undefined;
+
         switch (operation.type) {
-          case "campaign_create":
-            // In production: create campaign
-            break;
-          case "member_invite":
-            if (item.email && item.role) {
-              this.createInvite(operation.organizationId, {
-                email: item.email,
-                role: item.role,
-                invitedBy: operation.createdBy,
-              });
+          case "member_invite": {
+            if (!item?.email || !item?.role) {
+              throw new Error("email and role are required");
             }
+            if (item.role === "owner") {
+              throw new Error("Members cannot be invited as owner");
+            }
+            itemId = this.createInvite(operation.organizationId, {
+              email: item.email,
+              role: item.role,
+              invitedBy: operation.createdBy,
+            }).id;
             break;
-          // ... other types
+          }
+
+          case "member_remove":
+            if (!item?.userAddress) {
+              throw new Error("userAddress is required");
+            }
+            this.removeMember(operation.organizationId, item.userAddress, operation.createdBy);
+            itemId = item.userAddress;
+            break;
+
+          default: {
+            const handler = this.bulkHandlers[operation.type];
+            if (!handler) {
+              throw new Error(`"${operation.type}" bulk operations are not supported`);
+            }
+            itemId = (await handler(item, operation.createdBy))?.id;
+          }
         }
 
+        operation.results!.push({ itemIndex: i, itemId });
         operation.successCount++;
       } catch (error) {
         operation.failureCount++;
@@ -752,8 +798,9 @@ export class OrganizationService {
     const plainKey = `pk_${randomUUID().replace(/-/g, "")}${randomUUID().replace(/-/g, "")}`;
     const keyPrefix = plainKey.slice(0, 11);
 
-    // In production: hash the key properly
-    const keyHash = Buffer.from(plainKey).toString("base64");
+    // Only a digest is kept; the key itself is shown once. The key is 256
+    // random bits, so a plain SHA-256 cannot be brute-forced.
+    const keyHash = createHash("sha256").update(plainKey).digest("hex");
 
     const apiKey: OrganizationApiKey = {
       id: keyId,

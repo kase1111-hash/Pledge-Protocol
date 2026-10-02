@@ -275,7 +275,8 @@ export interface CampaignPrediction {
   predictedFinalAmount: string;
   confidence: number; // 0-100
   predictedBackers: number;
-  fundingProbability: number; // 0-100 probability of reaching goal
+  /** 0-100 probability of reaching the goal; null when there is no goal */
+  fundingProbability: number | null;
   projectedEndDate?: number;
   factors: {
     factor: string;
@@ -293,7 +294,7 @@ export interface FundingVelocity {
     amount: string;
     cumulative: string;
     backers: number;
-    velocity: number; // Amount per hour
+    velocity: number; // ETH per hour
   }[];
   averageVelocity: number;
   peakVelocity: {
@@ -309,7 +310,7 @@ export interface FundingVelocity {
 
 export interface AdvancedCampaignServiceInterface {
   // Recurring campaigns
-  createRecurringCampaign(params: CreateRecurringCampaignParams): RecurringCampaign;
+  createRecurringCampaign(params: CreateRecurringCampaignParams): Promise<RecurringCampaign>;
   getRecurringCampaign(id: string): RecurringCampaign | null;
   listRecurringCampaigns(ownerAddress: string): RecurringCampaign[];
   updateRecurringCampaign(
@@ -319,41 +320,41 @@ export interface AdvancedCampaignServiceInterface {
   pauseRecurringCampaign(id: string): RecurringCampaign;
   resumeRecurringCampaign(id: string): RecurringCampaign;
   cancelRecurringCampaign(id: string): RecurringCampaign;
-  createNextInstance(id: string): RecurringInstance;
+  createNextInstance(id: string): Promise<RecurringInstance>;
 
   // Stretch goals
   addStretchGoal(campaignId: string, goal: CreateStretchGoalParams): StretchGoal;
   getStretchGoals(campaignId: string): StretchGoal[];
   updateStretchGoal(goalId: string, updates: Partial<StretchGoal>): StretchGoal;
   removeStretchGoal(goalId: string): boolean;
-  checkStretchGoalProgress(campaignId: string): StretchGoalProgress;
+  checkStretchGoalProgress(campaignId: string): Promise<StretchGoalProgress>;
 
   // Scheduling
   scheduleLaunch(campaignId: string, launchDate: number, settings?: LaunchSchedule["prelaunchSettings"]): LaunchSchedule;
   scheduleAction(campaignId: string, action: Omit<ScheduledAction, "id" | "status" | "createdAt">): ScheduledAction;
   getScheduledActions(campaignId: string): ScheduledAction[];
   cancelScheduledAction(actionId: string): boolean;
-  processScheduledActions(): Promise<ScheduledAction[]>;
+  processScheduledActions(now?: number): Promise<ScheduledAction[]>;
 
   // Series
   createSeries(params: CreateSeriesParams): CampaignSeries;
   getSeries(id: string): CampaignSeries | null;
-  addCampaignToSeries(seriesId: string, campaignId: string, relationship: SeriesCampaign["relationship"]): CampaignSeries;
+  addCampaignToSeries(seriesId: string, campaignId: string, relationship: SeriesCampaign["relationship"]): Promise<CampaignSeries>;
   removeCampaignFromSeries(seriesId: string, campaignId: string): CampaignSeries;
   getSeriesForCampaign(campaignId: string): CampaignSeries | null;
 
   // Milestone scheduling
   scheduleMilestoneVerification(
+    campaignId: string,
     milestoneId: string,
     scheduledDate: number,
     autoVerify?: boolean
-  ): MilestoneSchedule;
+  ): Promise<MilestoneSchedule>;
   addMilestoneReminder(milestoneId: string, params: CreateReminderParams): MilestoneReminder;
-  processScheduledMilestones(): Promise<MilestoneSchedule[]>;
 
   // Predictions
-  getPrediction(campaignId: string): CampaignPrediction;
-  getFundingVelocity(campaignId: string, period: FundingVelocity["period"]): FundingVelocity;
+  getPrediction(campaignId: string): Promise<CampaignPrediction>;
+  getFundingVelocity(campaignId: string, period: FundingVelocity["period"]): Promise<FundingVelocity>;
 }
 
 export interface CreateRecurringCampaignParams {

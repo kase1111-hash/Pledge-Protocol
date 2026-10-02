@@ -4,10 +4,12 @@
  */
 
 import { Router, Request, Response } from "express";
-import { searchService } from "../../discovery";
+import { ensureSearchIndexFresh, indexEntriesFor, searchService } from "../../discovery";
+import { campaignsById, campaignsCreatedBy, pledgesByBacker } from "../../database";
 import { disputeService } from "../../governance";
 import { notificationService } from "../../notifications";
-import { authMiddleware, requireSelfOrAdmin } from "../../security/middleware";
+import { commemorativeService } from "../../tokens";
+import { asyncHandler, authMiddleware, requireSelfOrAdmin } from "../../security/middleware";
 
 const router = Router();
 
@@ -19,12 +21,12 @@ const router = Router();
  * GET /analytics/creators/:address/dashboard
  * Get creator dashboard overview
  */
-router.get("/creators/:address/dashboard", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
+router.get("/creators/:address/dashboard", authMiddleware(), requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
   try {
     const { address } = req.params;
 
     // Get creator's campaigns
-    const campaigns = searchService.getCreatorCampaigns(address);
+    const campaigns = await indexEntriesFor(await campaignsCreatedBy(address));
 
     // Calculate metrics
     let totalPledged = BigInt(0);
@@ -101,16 +103,16 @@ router.get("/creators/:address/dashboard", authMiddleware(), requireSelfOrAdmin(
       error: (error as Error).message,
     });
   }
-});
+}));
 
 /**
  * GET /analytics/creators/:address/campaigns
  * Get detailed campaign analytics for creator
  */
-router.get("/creators/:address/campaigns", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
+router.get("/creators/:address/campaigns", authMiddleware(), requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
   try {
     const { address } = req.params;
-    const campaigns = searchService.getCreatorCampaigns(address);
+    const campaigns = await indexEntriesFor(await campaignsCreatedBy(address));
 
     const campaignAnalytics = campaigns.map((campaign) => ({
       id: campaign.id,
@@ -156,16 +158,16 @@ router.get("/creators/:address/campaigns", authMiddleware(), requireSelfOrAdmin(
       error: (error as Error).message,
     });
   }
-});
+}));
 
 /**
  * GET /analytics/creators/:address/performance
  * Get creator performance over time
  */
-router.get("/creators/:address/performance", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
+router.get("/creators/:address/performance", authMiddleware(), requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
   try {
     const { address } = req.params;
-    const campaigns = searchService.getCreatorCampaigns(address);
+    const campaigns = await indexEntriesFor(await campaignsCreatedBy(address));
 
     // Group by month
     const monthlyData: Record<
@@ -223,110 +225,157 @@ router.get("/creators/:address/performance", authMiddleware(), requireSelfOrAdmi
       error: (error as Error).message,
     });
   }
-});
+}));
 
 // ============================================================================
 // BACKER ANALYTICS
 // ============================================================================
 
 /**
+ * A backer's pledges with their campaigns' discovery entries
+ */
+async function backerPledges(address: string) {
+  const pledges = (await pledgesByBacker(address)).sort((a, b) => b.createdAt - a.createdAt);
+  const campaigns = await campaignsById(pledges.map((p) => p.campaignId));
+  const entries = new Map(
+    (await indexEntriesFor(Array.from(campaigns.values()))).map((entry) => [entry.id, entry])
+  );
+
+  let totalPledged = 0n;
+  let totalReleased = 0n;
+  let totalRefunded = 0n;
+  let pendingResolution = 0n;
+  const byStatus = { active: 0, resolved: 0, refunded: 0, cancelled: 0 };
+
+  for (const pledge of pledges) {
+    byStatus[pledge.status]++;
+    totalRefunded += BigInt(pledge.refundedAmount ?? "0");
+    if (pledge.status === "cancelled") continue;
+    totalPledged += BigInt(pledge.escrowedAmount);
+    totalReleased += BigInt(pledge.finalAmount ?? "0");
+    if (pledge.status === "active") pendingResolution += BigInt(pledge.escrowedAmount);
+  }
+
+  return { pledges, campaigns, entries, totalPledged, totalReleased, totalRefunded, pendingResolution, byStatus };
+}
+
+/**
  * GET /analytics/backers/:address/dashboard
  * Get backer dashboard overview
  */
-router.get("/backers/:address/dashboard", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
-  try {
-    const { address } = req.params;
+router.get("/backers/:address/dashboard", authMiddleware(), requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
+  const { address } = req.params;
+  const data = await backerPledges(address);
 
-    // Get notifications for backer
-    const notifications = notificationService.getNotifications({
-      recipient: address,
-      status: ["pending", "delivered"],
-    });
-    const unreadCount = notificationService.getUnreadCount(address);
+  const notifications = notificationService.getNotifications({
+    recipient: address,
+    status: ["pending", "delivered"],
+  });
+  const unreadCount = notificationService.getUnreadCount(address);
 
-    // Mock portfolio data (would come from pledge database in production)
-    const portfolio = {
-      totalPledged: "0",
-      totalReleased: "0",
-      totalRefunded: "0",
-      activePledges: 0,
-      resolvedPledges: 0,
-      commemorativesOwned: 0,
-    };
+  const now = new Date();
+  const monthStart = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1) / 1000;
+  const supported = new Set(
+    data.pledges.filter((p) => p.status !== "cancelled").map((p) => p.campaignId)
+  );
 
-    res.json({
-      success: true,
-      data: {
-        portfolio,
-        notifications: {
-          unread: unreadCount,
-          recent: notifications.slice(0, 5),
-        },
-        activity: {
-          pledgesThisMonth: 0,
-          campaignsSupported: 0,
-          categoriesExplored: [],
-        },
+  res.json({
+    success: true,
+    data: {
+      portfolio: {
+        totalPledged: data.totalPledged.toString(),
+        totalReleased: data.totalReleased.toString(),
+        totalRefunded: data.totalRefunded.toString(),
+        activePledges: data.byStatus.active,
+        resolvedPledges: data.byStatus.resolved + data.byStatus.refunded,
+        commemorativesOwned: commemorativeService.getByBackerAddress(address).length,
       },
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message,
-    });
-  }
-});
+      notifications: {
+        unread: unreadCount,
+        recent: notifications.slice(0, 5),
+      },
+      activity: {
+        pledgesThisMonth: data.pledges.filter((p) => p.createdAt >= monthStart).length,
+        campaignsSupported: supported.size,
+        categoriesExplored: Array.from(
+          new Set(Array.from(supported).map((id) => data.entries.get(id)?.category).filter(Boolean))
+        ),
+      },
+    },
+  });
+}));
 
 /**
  * GET /analytics/backers/:address/portfolio
  * Get backer portfolio analytics
  */
-router.get("/backers/:address/portfolio", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
-  try {
-    const { address } = req.params;
+router.get("/backers/:address/portfolio", authMiddleware(), requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
+  const { address } = req.params;
+  const data = await backerPledges(address);
+  const counted = data.pledges.filter((p) => p.status !== "cancelled");
 
-    // Mock portfolio data
-    const portfolio = {
-      summary: {
-        totalValue: "0",
-        totalPledged: "0",
-        totalReleased: "0",
-        totalRefunded: "0",
-        pendingResolution: "0",
-      },
-      pledgesByStatus: {
-        active: 0,
-        resolved: 0,
-        refunded: 0,
-        cancelled: 0,
-      },
-      pledgesByCategory: {
-        fitness: 0,
-        education: 0,
-        creative: 0,
-        opensource: 0,
-        business: 0,
-        research: 0,
-        personal: 0,
-        other: 0,
-      },
-      successRate: "0",
-      averagePledgeAmount: "0",
-      topBeneficiaries: [],
-      recentPledges: [],
+  const pledgesByCategory: Record<string, number> = {
+    fitness: 0,
+    education: 0,
+    creative: 0,
+    opensource: 0,
+    business: 0,
+    research: 0,
+    personal: 0,
+    other: 0,
+  };
+  const byBeneficiary = new Map<string, { address: string; name: string; amount: bigint; pledges: number }>();
+  for (const pledge of counted) {
+    pledgesByCategory[data.entries.get(pledge.campaignId)?.category ?? "other"]++;
+
+    const campaign = data.campaigns.get(pledge.campaignId);
+    if (!campaign) continue;
+    const key = campaign.beneficiary.toLowerCase();
+    const entry = byBeneficiary.get(key) ?? {
+      address: campaign.beneficiary,
+      name: campaign.beneficiaryName,
+      amount: 0n,
+      pledges: 0,
     };
-
-    res.json({
-      success: true,
-      data: portfolio,
-    });
-  } catch (error) {
-    res.status(500).json({
-      success: false,
-      error: (error as Error).message,
-    });
+    entry.amount += BigInt(pledge.escrowedAmount);
+    entry.pledges++;
+    byBeneficiary.set(key, entry);
   }
-});
+
+  // Share of resolved pledges that released anything to the beneficiary
+  const settled = counted.filter((p) => p.status !== "active");
+  const succeeded = settled.filter((p) => BigInt(p.finalAmount ?? "0") > 0n).length;
+
+  res.json({
+    success: true,
+    data: {
+      summary: {
+        totalValue: (data.totalPledged - data.totalRefunded).toString(),
+        totalPledged: data.totalPledged.toString(),
+        totalReleased: data.totalReleased.toString(),
+        totalRefunded: data.totalRefunded.toString(),
+        pendingResolution: data.pendingResolution.toString(),
+      },
+      pledgesByStatus: data.byStatus,
+      pledgesByCategory,
+      successRate: settled.length > 0 ? ((succeeded / settled.length) * 100).toFixed(1) : "0",
+      averagePledgeAmount:
+        counted.length > 0 ? (data.totalPledged / BigInt(counted.length)).toString() : "0",
+      topBeneficiaries: Array.from(byBeneficiary.values())
+        .sort((a, b) => (b.amount > a.amount ? 1 : b.amount < a.amount ? -1 : 0))
+        .slice(0, 5)
+        .map((b) => ({ ...b, amount: b.amount.toString() })),
+      recentPledges: data.pledges.slice(0, 5).map((p) => ({
+        id: p.id,
+        campaignId: p.campaignId,
+        campaignName: data.campaigns.get(p.campaignId)?.name ?? null,
+        amount: p.escrowedAmount,
+        status: p.status,
+        createdAt: p.createdAt,
+      })),
+    },
+  });
+}));
 
 // ============================================================================
 // PLATFORM ANALYTICS
@@ -336,7 +385,8 @@ router.get("/backers/:address/portfolio", authMiddleware(), requireSelfOrAdmin()
  * GET /analytics/platform/overview
  * Get platform-wide analytics
  */
-router.get("/platform/overview", (_req: Request, res: Response) => {
+router.get("/platform/overview", asyncHandler(async (_req: Request, res: Response) => {
+  await ensureSearchIndexFresh();
   try {
     const searchStats = searchService.getStatistics();
     const disputeStats = disputeService.getStatistics();
@@ -374,13 +424,14 @@ router.get("/platform/overview", (_req: Request, res: Response) => {
       error: (error as Error).message,
     });
   }
-});
+}));
 
 /**
  * GET /analytics/platform/trending
  * Get trending metrics
  */
-router.get("/platform/trending", (req: Request, res: Response) => {
+router.get("/platform/trending", asyncHandler(async (req: Request, res: Response) => {
+  await ensureSearchIndexFresh();
   try {
     const limit = parseInt(req.query.limit as string) || 10;
 
@@ -435,7 +486,7 @@ router.get("/platform/trending", (req: Request, res: Response) => {
       error: (error as Error).message,
     });
   }
-});
+}));
 
 // ============================================================================
 // SEARCH & DISCOVERY
@@ -445,7 +496,8 @@ router.get("/platform/trending", (req: Request, res: Response) => {
  * GET /analytics/search
  * Search campaigns
  */
-router.get("/search", (req: Request, res: Response) => {
+router.get("/search", asyncHandler(async (req: Request, res: Response) => {
+  await ensureSearchIndexFresh();
   try {
     const {
       q,
@@ -516,13 +568,14 @@ router.get("/search", (req: Request, res: Response) => {
       error: (error as Error).message,
     });
   }
-});
+}));
 
 /**
  * GET /analytics/campaigns/:campaignId/similar
  * Get similar campaigns
  */
-router.get("/campaigns/:campaignId/similar", (req: Request, res: Response) => {
+router.get("/campaigns/:campaignId/similar", asyncHandler(async (req: Request, res: Response) => {
+  await ensureSearchIndexFresh();
   try {
     const { campaignId } = req.params;
     const limit = parseInt(req.query.limit as string) || 5;
@@ -549,6 +602,6 @@ router.get("/campaigns/:campaignId/similar", (req: Request, res: Response) => {
       error: (error as Error).message,
     });
   }
-});
+}));
 
 export default router;

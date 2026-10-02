@@ -136,7 +136,6 @@ export interface CurrencyConfig {
   symbol: string;
   decimals: number;
   isCrypto: boolean;
-  exchangeRates: Record<string, number>; // Rates to USD
 }
 
 export interface ExchangeRate {
@@ -226,12 +225,12 @@ export interface TranslationServiceInterface {
 
   // Currency
   getSupportedCurrencies(): CurrencyConfig[];
-  getExchangeRate(from: SupportedCurrency, to: SupportedCurrency): ExchangeRate | null;
+  getExchangeRate(from: SupportedCurrency, to: SupportedCurrency): Promise<ExchangeRate | null>;
   convertCurrency(
     amount: number,
     from: SupportedCurrency,
     to: SupportedCurrency
-  ): { amount: number; rate: number };
+  ): Promise<{ amount: number; rate: number }>;
 
   // User preferences
   getUserPreferences(address: string): UserLocalePreferences;

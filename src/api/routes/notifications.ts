@@ -214,7 +214,7 @@ router.post("/digest/:address", authMiddleware(), requireSelfOrAdmin(), async (r
   try {
     const { period = "weekly" } = req.body;
 
-    const content = notificationService.generateDigest(
+    const content = await notificationService.generateDigest(
       req.params.address,
       period
     );

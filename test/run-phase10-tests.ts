@@ -90,16 +90,7 @@ describe("NotificationService", () => {
     assert(Array.isArray(notifications), "Returns array of notifications");
   });
 
-  describe("Digest Generation", () => {
-    const address = "0xtest_digest_1";
-
-    // Generate daily digest
-    const digest = notificationService.generateDigest(address, "daily");
-
-    assert(digest.address === address, "Digest address matches");
-    assert(digest.period.start < digest.period.end, "Period has valid range");
-    assert(typeof digest.summary.pledgesReceived === "number", "Digest has summary stats");
-  });
+  // Digests are covered by test/notification-delivery.test.ts
 
   describe("Delivery Stats", () => {
     const stats = notificationService.getDeliveryStats();
@@ -294,54 +285,7 @@ describe("IntegrationService Basic", () => {
   assert(list.length > 0, "User has integrations");
 });
 
-// ============================================================================
-// ADVANCED CAMPAIGN SERVICE BASIC TESTS
-// ============================================================================
-
-describe("AdvancedCampaignService Basic", () => {
-  // Recurring campaign
-  const recurring = advancedCampaignService.createRecurringCampaign({
-    templateCampaignId: "base_camp_1",
-    ownerAddress: "0xcreator_1",
-    name: "Monthly Marathon",
-    description: "Monthly fundraiser",
-    frequency: "monthly",
-    schedule: {
-      startDate: Date.now() + 86400000, // Tomorrow
-      dayOfMonth: 1,
-    },
-    settings: {
-      autoCreateInstances: false,
-    },
-  });
-
-  assert(recurring.id.startsWith("rec_"), "Recurring campaign has proper ID");
-  assert(recurring.ownerAddress === "0xcreator_1", "Owner matches");
-  assert(recurring.frequency === "monthly", "Frequency is monthly");
-  assert(["active", "scheduled", "draft"].includes(recurring.status), "Has valid status");
-
-  // Get recurring campaign
-  const retrieved = advancedCampaignService.getRecurringCampaign(recurring.id);
-  assert(retrieved !== null, "Can retrieve recurring campaign");
-
-  // List recurring campaigns
-  const list = advancedCampaignService.listRecurringCampaigns("0xcreator_1");
-  assert(list.length > 0, "Creator has recurring campaigns");
-
-  // Series
-  const series = advancedCampaignService.createSeries({
-    name: "Annual Marathon Series",
-    description: "Yearly Portland Marathon campaigns",
-    ownerAddress: "0xcreator_series_1",
-  });
-
-  assert(series.id.startsWith("ser_"), "Series has proper ID");
-  assert(series.name === "Annual Marathon Series", "Series name matches");
-  assert(Array.isArray(series.campaigns), "Has campaigns array");
-
-  const retrievedSeries = advancedCampaignService.getSeries(series.id);
-  assert(retrievedSeries !== null, "Can retrieve series");
-});
+// Advanced campaign behaviour is covered by test/advanced-campaigns.test.ts
 
 // ============================================================================
 // SUMMARY

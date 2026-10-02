@@ -36,7 +36,7 @@ const generateSingleSchema = z.object({
   outcomeSummary: z.string(),
   templateType: z.enum(["race_finish", "academic", "creative", "generic"]).optional(),
   customData: z.record(z.string(), z.unknown()).optional(),
-  storageProvider: z.enum(["ipfs", "arweave"]).optional()
+  storageProvider: z.enum(["ipfs", "arweave", "local"]).optional()
 });
 
 const generateCampaignSchema = z.object({
@@ -56,7 +56,7 @@ const generateCampaignSchema = z.object({
     contributionAmount: z.string(),
     pledgedAt: z.number()
   })),
-  storageProvider: z.enum(["ipfs", "arweave"]).optional()
+  storageProvider: z.enum(["ipfs", "arweave", "local"]).optional()
 });
 
 const mintSchema = z.object({
@@ -184,6 +184,56 @@ router.post("/generate/campaign", authMiddleware(), requireRole("admin", "system
     }
     throw error;
   }
+});
+
+/**
+ * GET /commemoratives/assets/:hash
+ * Images and metadata kept by the "local" storage provider
+ */
+router.get("/assets/:hash", (req: Request, res: Response) => {
+  const asset = /^[0-9a-f]{64}$/.test(req.params.hash) ? storageService.getLocalAsset(req.params.hash) : null;
+  if (!asset) {
+    return res.status(404).json({ error: { code: "NOT_FOUND", message: "Asset not found" } });
+  }
+
+  res.setHeader("Content-Type", asset.contentType);
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable"); // content-addressed
+  // SVGs can carry script; never let them run in this origin
+  res.setHeader("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; sandbox");
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.send(asset.content);
+});
+
+// Registered before "/:id", which would otherwise capture these paths
+/**
+ * GET /commemoratives/templates
+ * List available templates
+ */
+router.get("/templates", (_req: Request, res: Response) => {
+  const templates = imageGenerator.getTemplateTypes();
+
+  res.json({
+    templates: templates.map(t => ({
+      type: t,
+      name: formatTemplateName(t),
+      description: getTemplateDescription(t)
+    }))
+  });
+});
+
+/**
+ * GET /commemoratives/stats
+ * Get commemorative statistics
+ */
+router.get("/stats", (_req: Request, res: Response) => {
+  const stats = commemorativeService.getStats();
+
+  res.json({
+    totalRecords: stats.totalRecords,
+    minted: stats.minted,
+    unminted: stats.unminted,
+    byCampaign: Object.fromEntries(stats.byCampaign)
+  });
 });
 
 /**
@@ -401,37 +451,6 @@ router.get("/:id/metadata", (req: Request, res: Response) => {
 
   // Return ERC-5192 standard metadata
   res.json(record.metadata);
-});
-
-/**
- * GET /commemoratives/templates
- * List available templates
- */
-router.get("/templates", (_req: Request, res: Response) => {
-  const templates = imageGenerator.getTemplateTypes();
-
-  res.json({
-    templates: templates.map(t => ({
-      type: t,
-      name: formatTemplateName(t),
-      description: getTemplateDescription(t)
-    }))
-  });
-});
-
-/**
- * GET /commemoratives/stats
- * Get commemorative statistics
- */
-router.get("/stats", (_req: Request, res: Response) => {
-  const stats = commemorativeService.getStats();
-
-  res.json({
-    totalRecords: stats.totalRecords,
-    minted: stats.minted,
-    unminted: stats.unminted,
-    byCampaign: Object.fromEntries(stats.byCampaign)
-  });
 });
 
 // Helper functions

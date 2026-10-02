@@ -76,10 +76,10 @@ router.post("/generate", async (req: Request, res: Response) => {
  * GET /reports/financial/:address
  * Get financial summary
  */
-router.get("/financial/:address", requireSelfOrAdmin(), (req: Request, res: Response) => {
+router.get("/financial/:address", requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
   const { period = "month", currency, timezone } = req.query;
 
-  const summary = reportService.getFinancialSummary(
+  const summary = await reportService.getFinancialSummary(
     req.params.address,
     period as any,
     {
@@ -89,34 +89,34 @@ router.get("/financial/:address", requireSelfOrAdmin(), (req: Request, res: Resp
   );
 
   res.json(summary);
-});
+}));
 
 /**
  * GET /reports/transactions/:address
  * Get transaction history
  */
-router.get("/transactions/:address", requireSelfOrAdmin(), (req: Request, res: Response) => {
+router.get("/transactions/:address", requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
   const { campaignIds, minAmount, maxAmount } = req.query;
 
-  const transactions = reportService.getTransactionHistory(req.params.address, {
+  const transactions = await reportService.getTransactionHistory(req.params.address, {
     campaignIds: campaignIds ? String(campaignIds).split(",") : undefined,
     minAmount: minAmount as string,
     maxAmount: maxAmount as string,
   });
 
   res.json({ transactions });
-});
+}));
 
 /**
  * GET /reports/payouts/:address
  * Get payout report
  */
-router.get("/payouts/:address", requireSelfOrAdmin(), (req: Request, res: Response) => {
+router.get("/payouts/:address", requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
   const { period = "month" } = req.query;
 
-  const payouts = reportService.getPayoutReport(req.params.address, period as any);
+  const payouts = await reportService.getPayoutReport(req.params.address, period as any);
   res.json(payouts);
-});
+}));
 
 // ============================================================================
 // TAX REPORTS
@@ -126,17 +126,17 @@ router.get("/payouts/:address", requireSelfOrAdmin(), (req: Request, res: Respon
  * GET /reports/tax/:address/:year
  * Get tax summary
  */
-router.get("/tax/:address/:year", requireSelfOrAdmin(), (req: Request, res: Response) => {
+router.get("/tax/:address/:year", requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
   const { country = "US" } = req.query;
 
-  const summary = reportService.getTaxSummary(
+  const summary = await reportService.getTaxSummary(
     req.params.address,
     parseInt(req.params.year),
     country as string
   );
 
   res.json(summary);
-});
+}));
 
 /**
  * POST /reports/tax/:address/form
@@ -179,16 +179,16 @@ const requireCampaignCreator = asyncHandler(async (req: Request, res: Response, 
  * GET /reports/campaigns/:campaignId/performance
  * Get campaign performance report
  */
-router.get("/campaigns/:campaignId/performance", requireCampaignCreator, (req: Request, res: Response) => {
+router.get("/campaigns/:campaignId/performance", requireCampaignCreator, asyncHandler(async (req: Request, res: Response) => {
   const { period } = req.query;
 
-  const performance = reportService.getCampaignPerformance(
+  const performance = await reportService.getCampaignPerformance(
     req.params.campaignId,
     period as any
   );
 
   res.json(performance);
-});
+}));
 
 // ============================================================================
 // BACKER REPORTS
@@ -198,12 +198,12 @@ router.get("/campaigns/:campaignId/performance", requireCampaignCreator, (req: R
  * GET /reports/backers/:address/activity
  * Get backer activity report
  */
-router.get("/backers/:address/activity", requireSelfOrAdmin(), (req: Request, res: Response) => {
+router.get("/backers/:address/activity", requireSelfOrAdmin(), asyncHandler(async (req: Request, res: Response) => {
   const { period } = req.query;
 
-  const activity = reportService.getBackerActivity(req.params.address, period as any);
+  const activity = await reportService.getBackerActivity(req.params.address, period as any);
   res.json(activity);
-});
+}));
 
 // ============================================================================
 // AUDIT & PLATFORM (admin)
@@ -213,23 +213,23 @@ router.get("/backers/:address/activity", requireSelfOrAdmin(), (req: Request, re
  * GET /reports/audit/:entityType/:entityId
  * Get audit trail
  */
-router.get("/audit/:entityType/:entityId", requireRole("admin"), (req: Request, res: Response) => {
-  const audit = reportService.getAuditTrail(
+router.get("/audit/:entityType/:entityId", requireRole("admin"), asyncHandler(async (req: Request, res: Response) => {
+  const audit = await reportService.getAuditTrail(
     req.params.entityType,
     req.params.entityId
   );
 
   res.json(audit);
-});
+}));
 
 /**
  * GET /reports/disputes
  * Get dispute summary
  */
-router.get("/disputes", requireRole("admin", "arbitrator"), (req: Request, res: Response) => {
-  const summary = reportService.getDisputeSummary();
+router.get("/disputes", requireRole("admin", "arbitrator"), asyncHandler(async (req: Request, res: Response) => {
+  const summary = await reportService.getDisputeSummary();
   res.json(summary);
-});
+}));
 
 // ============================================================================
 // EXPORTS
@@ -276,6 +276,33 @@ router.get("/exports/:exportId", (req: Request, res: Response) => {
     res.json(exportStatus);
   }
 });
+
+/**
+ * GET /reports/exports/:exportId/download
+ * Download an export file
+ */
+router.get("/exports/:exportId/download", asyncHandler(async (req: Request, res: Response) => {
+  const exportRequest = owned(
+    req,
+    res,
+    reportService.getExportStatus(req.params.exportId),
+    (e) => e.requestedBy,
+    "Export"
+  );
+  if (!exportRequest) return;
+
+  const buffer = await reportService.downloadExport(req.params.exportId);
+  if (!buffer) {
+    return res.status(404).json({ error: "Export not available" });
+  }
+
+  res.setHeader("Content-Type", getContentType(exportRequest.format));
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="export_${req.params.exportId}.${exportRequest.format}"`
+  );
+  res.send(buffer);
+}));
 
 // ============================================================================
 // SCHEDULED REPORTS

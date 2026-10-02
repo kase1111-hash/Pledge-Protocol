@@ -393,37 +393,35 @@ describe("Token System (Phase 3)", function () {
       storage.clearCache();
     });
 
-    describe("Mock Uploads", function () {
-      it("should upload content to IPFS (mock)", async function () {
-        const result = await storage.upload(
-          "test content",
-          "text/plain",
-          "ipfs"
-        );
+    describe("Uploads", function () {
+      it("stores content locally, addressed by its hash", async function () {
+        const result = await storage.upload("test content", "text/plain");
 
-        expect(result.provider).to.equal("ipfs");
-        expect(result.uri).to.match(/^ipfs:\/\/Qm/);
-        expect(result.hash).to.be.a("string");
-        expect(result.timestamp).to.be.a("number");
+        expect(result.provider).to.equal("local");
+        expect(result.uri).to.match(/^local:\/\/[0-9a-f]{64}$/);
+        expect(storage.getLocalAsset(result.hash)!.content.toString()).to.equal("test content");
+        expect(await storage.fetch(result.uri)).to.deep.equal(Buffer.from("test content"));
+        expect(await storage.verify(result.uri)).to.equal(true);
+        expect(storage.toHttpUrl(result.uri)).to.equal(`http://localhost:3000/v1/commemoratives/assets/${result.hash}`);
       });
 
-      it("should upload content to Arweave (mock)", async function () {
-        const result = await storage.upload(
-          "test content",
-          "text/plain",
-          "arweave"
-        );
-
-        expect(result.provider).to.equal("arweave");
-        expect(result.uri).to.match(/^ar:\/\//);
-        expect(result.hash).to.be.a("string");
+      it("refuses providers that are not configured instead of faking an upload", async function () {
+        for (const provider of ["ipfs", "arweave"] as const) {
+          let error: Error | undefined;
+          try {
+            await storage.upload("test content", "text/plain", provider);
+          } catch (e) {
+            error = e as Error;
+          }
+          expect(error?.message).to.match(/storage is not configured/);
+        }
       });
 
       it("should cache uploads", async function () {
         const content = "cached content";
 
-        const result1 = await storage.upload(content, "text/plain", "ipfs");
-        const result2 = await storage.upload(content, "text/plain", "ipfs");
+        const result1 = await storage.upload(content, "text/plain", "local");
+        const result2 = await storage.upload(content, "text/plain", "local");
 
         expect(result1.uri).to.equal(result2.uri);
         expect(result1.hash).to.equal(result2.hash);
@@ -470,8 +468,8 @@ describe("Token System (Phase 3)", function () {
 
     describe("Cache Management", function () {
       it("should report cache statistics", async function () {
-        await storage.upload("content1", "text/plain", "ipfs");
-        await storage.upload("content2", "text/plain", "ipfs");
+        await storage.upload("content1", "text/plain", "local");
+        await storage.upload("content2", "text/plain", "local");
 
         const stats = storage.getCacheStats();
 
@@ -480,7 +478,7 @@ describe("Token System (Phase 3)", function () {
       });
 
       it("should clear cache", async function () {
-        await storage.upload("content", "text/plain", "ipfs");
+        await storage.upload("content", "text/plain", "local");
         storage.clearCache();
 
         const stats = storage.getCacheStats();
@@ -522,8 +520,8 @@ describe("Token System (Phase 3)", function () {
         expect(result.success).to.be.true;
         expect(result.record).to.exist;
         expect(result.record!.pledgeId).to.equal(request.pledgeId);
-        expect(result.record!.imageUri).to.match(/^(ipfs|ar):\/\//);
-        expect(result.record!.metadataUri).to.match(/^(ipfs|ar):\/\//);
+        expect(result.record!.imageUri).to.match(/^(ipfs|ar|local):\/\//);
+        expect(result.record!.metadataUri).to.match(/^(ipfs|ar|local):\/\//);
       });
 
       it("should return existing record on duplicate generation", async function () {
@@ -777,8 +775,8 @@ describe("Token System (Phase 3)", function () {
         const result = await service.generatePledgeTokenMetadata(pledgeData);
 
         expect(result.metadata).to.exist;
-        expect(result.imageUri).to.match(/^(ipfs|ar):\/\//);
-        expect(result.metadataUri).to.match(/^(ipfs|ar):\/\//);
+        expect(result.imageUri).to.match(/^(ipfs|ar|local):\/\//);
+        expect(result.metadataUri).to.match(/^(ipfs|ar|local):\/\//);
       });
 
       it("should cache generated metadata", async function () {
@@ -817,14 +815,14 @@ describe("Token System (Phase 3)", function () {
         const url = service.getMetadataUrl("pledge_url_test");
 
         expect(url).to.be.a("string");
-        expect(url).to.match(/^https:\/\//);
+        expect(url).to.match(/^https?:\/\//);
       });
 
       it("should return image URL", function () {
         const url = service.getImageUrl("pledge_url_test");
 
         expect(url).to.be.a("string");
-        expect(url).to.match(/^https:\/\//);
+        expect(url).to.match(/^https?:\/\//);
       });
 
       it("should return undefined for unknown pledge", function () {

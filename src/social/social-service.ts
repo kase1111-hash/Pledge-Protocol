@@ -219,6 +219,14 @@ export class SocialService {
   }
 
   /**
+   * Follow records for the people following an address
+   */
+  getFollowRecords(address: string): Follow[] {
+    const target = address.toLowerCase();
+    return Array.from(this.follows.values()).filter((f) => f.following === target);
+  }
+
+  /**
    * Unfollow a user
    */
   unfollow(follower: string, following: string): boolean {
@@ -779,6 +787,71 @@ export class SocialService {
   /**
    * Get social statistics
    */
+  // ==========================================================================
+  // PERSONAL DATA (GDPR)
+  // ==========================================================================
+
+  /**
+   * Everything stored about a user, for data export requests
+   */
+  exportUser(address: string): {
+    profile: UserProfile | null;
+    following: string[];
+    followers: string[];
+    comments: Comment[];
+    activity: Activity[];
+  } {
+    const user = address.toLowerCase();
+    const follows = Array.from(this.follows.values());
+    return {
+      profile: this.profiles.get(user) ?? null,
+      following: follows.filter((f) => f.follower === user).map((f) => f.following),
+      followers: follows.filter((f) => f.following === user).map((f) => f.follower),
+      comments: Array.from(this.comments.values()).filter((c) => c.author.toLowerCase() === user),
+      activity: Array.from(this.activities.values()).filter((a) => a.actor.toLowerCase() === user),
+    };
+  }
+
+  /**
+   * Erase a user's social data. Profile, follows and activity are deleted;
+   * comments are deleted, or with "anonymize" kept without their author so
+   * discussion threads stay readable.
+   */
+  eraseUser(address: string, mode: "delete" | "anonymize"): { deleted: number; anonymized: number } {
+    const user = address.toLowerCase();
+    let deleted = 0;
+    let anonymized = 0;
+
+    if (this.profiles.delete(user)) deleted++;
+
+    for (const [key, follow] of Array.from(this.follows.entries())) {
+      if (follow.follower === user || follow.following === user) {
+        this.follows.delete(key);
+        deleted++;
+      }
+    }
+
+    for (const [id, activity] of Array.from(this.activities.entries())) {
+      if (activity.actor.toLowerCase() === user) {
+        this.activities.delete(id);
+        deleted++;
+      }
+    }
+
+    for (const [id, comment] of Array.from(this.comments.entries())) {
+      if (comment.author.toLowerCase() !== user) continue;
+      if (mode === "delete") {
+        this.comments.delete(id);
+        deleted++;
+      } else {
+        this.comments.set(id, { ...comment, author: "anonymized" });
+        anonymized++;
+      }
+    }
+
+    return { deleted, anonymized };
+  }
+
   getStatistics(): {
     totalProfiles: number;
     totalFollows: number;

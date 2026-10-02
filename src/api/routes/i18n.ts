@@ -6,7 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { translationService } from "../../i18n";
-import { authMiddleware, requireRole, requireSelfOrAdmin, sameAddress } from "../../security/middleware";
+import { asyncHandler, authMiddleware, requireRole, requireSelfOrAdmin, sameAddress } from "../../security/middleware";
 
 const router = Router();
 
@@ -262,12 +262,12 @@ router.get("/currencies", (_req: Request, res: Response) => {
  * GET /i18n/currencies/rates
  * Get exchange rates
  */
-router.get("/currencies/rates", (req: Request, res: Response) => {
+router.get("/currencies/rates", asyncHandler(async (req: Request, res: Response) => {
   const { from, to } = req.query;
 
   if (from && to) {
-    const rate = translationService.getExchangeRate(from as any, to as any);
-    return res.json(rate || { error: "Rate not available" });
+    const rate = await translationService.getExchangeRate(from as any, to as any);
+    return rate ? res.json(rate) : res.status(503).json({ error: "Rate not available" });
   }
 
   // Return all rates to USD
@@ -275,24 +275,27 @@ router.get("/currencies/rates", (req: Request, res: Response) => {
   const rates: Record<string, number> = {};
 
   for (const currency of currencies) {
-    const rate = translationService.getExchangeRate(currency.code, "USD");
+    const rate = await translationService.getExchangeRate(currency.code, "USD");
     if (rate) {
       rates[currency.code] = rate.rate;
     }
   }
 
+  if (Object.keys(rates).length <= 1) {
+    return res.status(503).json({ error: "Exchange rates are unavailable" });
+  }
   res.json({ baseCurrency: "USD", rates });
-});
+}));
 
 /**
  * POST /i18n/currencies/convert
  * Convert between currencies
  */
-router.post("/currencies/convert", (req: Request, res: Response) => {
+router.post("/currencies/convert", asyncHandler(async (req: Request, res: Response) => {
   try {
     const { amount, from, to } = req.body;
 
-    const result = translationService.convertCurrency(amount, from, to);
+    const result = await translationService.convertCurrency(amount, from, to);
     res.json({
       from: { currency: from, amount },
       to: { currency: to, amount: result.amount },
@@ -303,7 +306,7 @@ router.post("/currencies/convert", (req: Request, res: Response) => {
       error: error instanceof Error ? error.message : "Conversion failed",
     });
   }
-});
+}));
 
 // ============================================================================
 // USER PREFERENCES

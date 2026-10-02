@@ -125,6 +125,7 @@ class PostgresSession implements StoreSession {
     addFilter(where, values, "status", query.status);
     addFilter(where, values, "visibility", query.visibility);
     addFilter(where, values, "creator", query.creator?.toLowerCase());
+    addFilter(where, values, "lower(data->>'beneficiary')", query.beneficiary?.toLowerCase());
 
     const count = await this.db.query(
       `SELECT COUNT(*)::int AS total FROM campaign_records ${whereClause(where)}`,
@@ -355,7 +356,45 @@ export class PostgresStore extends PostgresSession implements DomainStore {
     }
   }
 
+  private instanceLock: PoolClient | null = null;
+
+  /**
+   * Hold a session-level advisory lock for as long as this process runs, so
+   * a second API instance against the same database (and schema) refuses to
+   * start. Service state such as sessions, roles and webhooks is kept in
+   * memory and written back to the database, so two instances would
+   * overwrite each other's changes.
+   *
+   * onLost runs if the lock's connection drops, since the lock goes with it.
+   */
+  async acquireInstanceLock(onLost: (error: Error) => void): Promise<void> {
+    if (this.instanceLock) return;
+
+    const client = await this.pool.connect();
+    const result = await client.query<{ locked: boolean }>(
+      "SELECT pg_try_advisory_lock(727002, hashtext(current_schema())) AS locked"
+    );
+    if (!result.rows[0].locked) {
+      client.release();
+      throw new Error(
+        "Another Pledge Protocol API instance is already running against this database. " +
+          "Only one instance may run at a time: service state is held in memory and written back."
+      );
+    }
+
+    client.on("error", (error) => {
+      if (this.instanceLock === client) onLost(error);
+    });
+    this.instanceLock = client;
+  }
+
   async close(): Promise<void> {
+    const lock = this.instanceLock;
+    this.instanceLock = null;
+    if (lock) {
+      await lock.query("SELECT pg_advisory_unlock(727002, hashtext(current_schema()))").catch(() => undefined);
+      lock.release();
+    }
     await this.pool.end();
   }
 }

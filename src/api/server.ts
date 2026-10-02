@@ -12,8 +12,13 @@ import { oracleCache, campaignCache, sessionCache, generalCache } from "../infra
 import { authService } from "../security/auth-service";
 import { ipRateLimiter, userRateLimiter, endpointRateLimiter } from "../security/rate-limiter";
 import { logger } from "../security/audit-logger";
-import { initializeDatabase, closeDatabase } from "../database";
+import { initializeDatabase, closeDatabase, PostgresStore } from "../database";
 import { restorePersistentState, flushPersistentState } from "./persistence";
+import { reportService } from "../reporting";
+import { gdprService } from "./routes/compliance";
+import { advancedCampaignService } from "../campaigns-advanced";
+import { flushEvents } from "../events";
+import { notificationService as notificationServiceV2 } from "../notifications-v2";
 
 const PORT = env.PORT;
 
@@ -46,11 +51,39 @@ const dbType = (env.DATABASE_TYPE === "postgres" || env.DATABASE_TYPE === "postg
 initializeDatabase({
   type: dbType,
   connectionString: env.DATABASE_URL,
-}).then(async () => {
+}).then(async (store) => {
+  // One instance per database: see PostgresStore.acquireInstanceLock
+  if (store instanceof PostgresStore) {
+    await store.acquireInstanceLock((error) => {
+      logger.error("Lost the database connection holding the instance lock; exiting", error);
+      process.exit(1);
+    });
+  }
+
   await initializeOracles();
   // Load persisted service state before serving or running background work
   await restorePersistentState();
   jobQueue.start();
+
+  // Scheduled reports, campaign actions and notifications whose time has come, and
+  // confirmed data deletions whose grace period has ended
+  const reportInterval = setInterval(() => {
+    reportService
+      .runDueScheduledReports()
+      .catch((err) => logger.error("Running scheduled reports failed", err));
+    gdprService
+      .processDueDeletions()
+      .catch((err) => logger.error("Processing data deletions failed", err));
+    advancedCampaignService
+      .processScheduledActions()
+      .catch((err) => logger.error("Running scheduled campaign actions failed", err));
+    notificationServiceV2
+      .processDueNotifications()
+      .catch((err) => logger.error("Sending queued notifications failed", err));
+    notificationServiceV2
+      .processDueDigests()
+      .catch((err) => logger.error("Sending digests failed", err));
+  }, 60_000);
 
   // Changes made outside a request (timers, background jobs) are stored here;
   // request handlers are flushed before they respond
@@ -85,12 +118,14 @@ initializeDatabase({
     jobQueue.stop();
     resolutionEngine.shutdown();
     clearInterval(flushInterval);
+    clearInterval(reportInterval);
 
-    // Stop accepting connections; once in-flight requests finish, store any
-    // remaining changes and close the database
+    // Stop accepting connections; once in-flight requests finish, deliver
+    // published events, store any remaining changes and close the database
     server.close(() => {
       logger.info("HTTP server closed");
-      flushPersistentState()
+      flushEvents()
+        .then(() => flushPersistentState())
         .catch((err) => logger.error("Final state flush failed", err))
         .then(() => closeDatabase())
         .then(() => process.exit(0))

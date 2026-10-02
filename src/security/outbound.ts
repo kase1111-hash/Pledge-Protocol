@@ -1,5 +1,6 @@
 /**
- * Outbound HTTP to user-supplied URLs (webhook deliveries).
+ * Outbound HTTP to URLs that users or admins supply (webhook and
+ * integration deliveries, oracle API endpoints).
  *
  * A user who can make the server send requests to a URL of their choosing can
  * otherwise reach internal services (cloud metadata endpoints, databases,
@@ -157,22 +158,26 @@ const publicOnlyLookup: LookupFunction = (hostname, options, callback) => {
 
 export interface OutboundResponse {
   status: number;
+  headers: http.IncomingHttpHeaders;
   /** Response body, truncated to maxResponseBytes */
   body: string;
 }
 
+export interface OutboundRequest {
+  method?: "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE";
+  headers?: Record<string, string>;
+  body?: string;
+  timeoutMs: number;
+  maxResponseBytes?: number;
+}
+
+/** Headers callers may not set: they would desynchronize or redirect the request */
+const RESERVED_HEADERS = new Set(["host", "content-length", "transfer-encoding", "connection"]);
+
 /**
- * POST to a user-supplied URL with the protections described above
+ * Send a request to a user-supplied URL with the protections described above
  */
-export async function postToUserUrl(
-  rawUrl: string,
-  options: {
-    headers: Record<string, string>;
-    body: string;
-    timeoutMs: number;
-    maxResponseBytes?: number;
-  }
-): Promise<OutboundResponse> {
+export async function requestUserUrl(rawUrl: string, options: OutboundRequest): Promise<OutboundResponse> {
   const problem = webhookUrlProblem(rawUrl);
   if (problem) {
     throw new Error(problem);
@@ -181,13 +186,19 @@ export async function postToUserUrl(
   const url = new URL(rawUrl);
   const client = url.protocol === "https:" ? https : http;
   const maxBytes = options.maxResponseBytes ?? 64 * 1024;
+  const headers: Record<string, string | number> = Object.fromEntries(
+    Object.entries(options.headers ?? {}).filter(([name]) => !RESERVED_HEADERS.has(name.toLowerCase()))
+  );
+  if (options.body !== undefined) {
+    headers["Content-Length"] = Buffer.byteLength(options.body);
+  }
 
   return new Promise<OutboundResponse>((resolve, reject) => {
     const request = client.request(
       url,
       {
-        method: "POST",
-        headers: { ...options.headers, "Content-Length": Buffer.byteLength(options.body) },
+        method: options.method ?? (options.body === undefined ? "GET" : "POST"),
+        headers,
         lookup: publicOnlyLookup,
         timeout: options.timeoutMs,
         // A fresh connection per request: no pooled socket bypasses the lookup
@@ -202,11 +213,19 @@ export async function postToUserUrl(
           size += chunk.length;
           if (size >= maxBytes) {
             response.destroy();
-            resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") });
+            resolve({
+              status: response.statusCode ?? 0,
+              headers: response.headers,
+              body: Buffer.concat(chunks).toString("utf8"),
+            });
           }
         });
         response.on("end", () =>
-          resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") })
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: response.headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          })
         );
         response.on("error", reject);
       }
@@ -216,4 +235,19 @@ export async function postToUserUrl(
     request.on("error", reject);
     request.end(options.body);
   });
+}
+
+/**
+ * POST to a user-supplied URL with the protections described above
+ */
+export async function postToUserUrl(
+  rawUrl: string,
+  options: {
+    headers: Record<string, string>;
+    body: string;
+    timeoutMs: number;
+    maxResponseBytes?: number;
+  }
+): Promise<OutboundResponse> {
+  return requestUserUrl(rawUrl, { ...options, method: "POST" });
 }

@@ -31,6 +31,9 @@ import {
   UpdateIntegrationParams,
   OAuthParams,
 } from "./types";
+import { createHmac } from "crypto";
+import { formatEther } from "ethers";
+import { requestUserUrl } from "../security/outbound";
 
 // ============================================================================
 // COLOR MAPPING
@@ -50,6 +53,59 @@ const EVENT_COLORS: Record<IntegrationEventType, { hex: string; decimal: number 
   new_comment: { hex: "#14B8A6", decimal: 1358006 }, // Teal
 };
 
+/** Provider endpoints; overridable for testing */
+export interface ProviderEndpoints {
+  slack: string;
+  discord: string;
+  telegram: string;
+  googleOAuth: string;
+  googleCalendar: string;
+}
+
+const PROVIDERS: ProviderEndpoints = {
+  slack: "https://slack.com/api",
+  discord: "https://discord.com/api",
+  telegram: "https://api.telegram.org",
+  googleOAuth: "https://oauth2.googleapis.com",
+  googleCalendar: "https://www.googleapis.com/calendar/v3",
+};
+
+const REQUEST_TIMEOUT_MS = 10_000;
+
+/** Integration types that receive event messages */
+const MESSAGING_TYPES: IntegrationType[] = ["slack", "discord", "zapier", "telegram", "webhook"];
+
+const OAUTH_ENV: Partial<Record<IntegrationType, { id: string; secret: string }>> = {
+  slack: { id: "SLACK_CLIENT_ID", secret: "SLACK_CLIENT_SECRET" },
+  discord: { id: "DISCORD_CLIENT_ID", secret: "DISCORD_CLIENT_SECRET" },
+  calendar: { id: "GOOGLE_CLIENT_ID", secret: "GOOGLE_CLIENT_SECRET" },
+};
+
+function oauthClient(type: IntegrationType): { id: string; secret: string } {
+  const names = OAUTH_ENV[type];
+  if (!names) {
+    throw new Error(`OAuth not supported for ${type}`);
+  }
+  const id = process.env[names.id];
+  const secret = process.env[names.secret];
+  if (!id || !secret) {
+    throw new Error(`${type} OAuth is not configured (set ${names.id} and ${names.secret})`);
+  }
+  return { id, secret };
+}
+
+function htmlEscape(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Signature for custom webhook deliveries: HMAC-SHA256 over
+ * "<timestamp>.<body>" with the integration's secret
+ */
+export function integrationSignature(secret: string, timestamp: string, body: string): string {
+  return `sha256=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
+}
+
 // ============================================================================
 // INTEGRATION SERVICE
 // ============================================================================
@@ -59,9 +115,51 @@ export class IntegrationService {
   private messages: Map<string, IntegrationMessage> = new Map();
   private oauthStates: Map<string, OAuthState> = new Map();
   private baseUrl: string;
+  private providers: ProviderEndpoints;
 
-  constructor(config: { baseUrl: string }) {
-    this.baseUrl = config.baseUrl;
+  constructor(config: { baseUrl: string; providers?: Partial<ProviderEndpoints> }) {
+    this.baseUrl = config.baseUrl.replace(/\/$/, "");
+    this.providers = { ...PROVIDERS, ...config.providers };
+  }
+
+  /** Where providers send users back after authorizing */
+  private get redirectUri(): string {
+    return `${this.baseUrl}/v1/integrations/oauth/callback`;
+  }
+
+  /**
+   * Call a provider or user-supplied URL; throws on network errors and
+   * non-2xx responses
+   */
+  private async call(
+    url: string,
+    options: { method?: "GET" | "POST"; headers?: Record<string, string>; body?: string }
+  ): Promise<string> {
+    const response = await requestUserUrl(url, {
+      method: options.method ?? "POST",
+      headers: options.headers,
+      body: options.body,
+      timeoutMs: REQUEST_TIMEOUT_MS,
+    });
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`HTTP ${response.status}: ${response.body.slice(0, 200)}`);
+    }
+    return response.body;
+  }
+
+  private async postJson(url: string, payload: unknown, headers: Record<string, string> = {}): Promise<string> {
+    return this.call(url, {
+      headers: { "Content-Type": "application/json", ...headers },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  private async postForm(url: string, fields: Record<string, string>): Promise<Record<string, any>> {
+    const body = await this.call(url, {
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      body: new URLSearchParams(fields).toString(),
+    });
+    return JSON.parse(body);
   }
 
   // ==========================================================================
@@ -95,7 +193,7 @@ export class IntegrationService {
 
   listIntegrations(ownerAddress: string): Integration[] {
     return Array.from(this.integrations.values()).filter(
-      (i) => i.ownerAddress === ownerAddress
+      (i) => i.ownerAddress.toLowerCase() === ownerAddress.toLowerCase()
     );
   }
 
@@ -155,6 +253,8 @@ export class IntegrationService {
   // ==========================================================================
 
   getOAuthUrl(type: IntegrationType, params: OAuthParams): string {
+    oauthClient(type);
+
     const state: OAuthState = {
       type,
       ownerAddress: params.ownerAddress,
@@ -166,7 +266,7 @@ export class IntegrationService {
     const stateToken = Buffer.from(JSON.stringify(state)).toString("base64url");
     this.oauthStates.set(stateToken, state);
 
-    const redirectUri = `${this.baseUrl}/api/v1/integrations/oauth/callback`;
+    const redirectUri = this.redirectUri;
 
     switch (type) {
       case "slack":
@@ -181,15 +281,15 @@ export class IntegrationService {
   }
 
   private getSlackOAuthUrl(state: string, redirectUri: string, scopes?: string[]): string {
-    const clientId = process.env.SLACK_CLIENT_ID || "";
+    const clientId = encodeURIComponent(oauthClient("slack").id);
     const defaultScopes = ["channels:read", "chat:write", "incoming-webhook"];
     const scopeString = (scopes || defaultScopes).join(",");
 
-    return `https://slack.com/oauth/v2/authorize?client_id=${clientId}&scope=${scopeString}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
+    return `https://slack.com/oauth/v2/authorize?client_id=${clientId}&scope=${encodeURIComponent(scopeString)}&redirect_uri=${encodeURIComponent(redirectUri)}&state=${state}`;
   }
 
   private getDiscordOAuthUrl(state: string, redirectUri: string, scopes?: string[]): string {
-    const clientId = process.env.DISCORD_CLIENT_ID || "";
+    const clientId = encodeURIComponent(oauthClient("discord").id);
     const defaultScopes = ["webhook.incoming", "guilds"];
     const scopeString = (scopes || defaultScopes).join(" ");
 
@@ -197,7 +297,7 @@ export class IntegrationService {
   }
 
   private getGoogleCalendarOAuthUrl(state: string, redirectUri: string, scopes?: string[]): string {
-    const clientId = process.env.GOOGLE_CLIENT_ID || "";
+    const clientId = encodeURIComponent(oauthClient("calendar").id);
     const defaultScopes = ["https://www.googleapis.com/auth/calendar.events"];
     const scopeString = (scopes || defaultScopes).join(" ");
 
@@ -216,52 +316,14 @@ export class IntegrationService {
 
     this.oauthStates.delete(state);
 
-    // Exchange code for tokens (simulated)
-    const tokens = await this.exchangeCodeForTokens(type, code);
-
-    // Create integration based on type
-    let config: IntegrationConfig;
-
-    switch (type) {
-      case "slack":
-        config = {
-          type: "slack",
-          workspaceId: "W12345",
-          workspaceName: "My Workspace",
-          channelId: "C12345",
-          channelName: "general",
-          botToken: tokens.accessToken,
-        };
-        break;
-
-      case "discord":
-        config = {
-          type: "discord",
-          guildId: "G12345",
-          guildName: "My Server",
-          channelId: "C12345",
-          channelName: "general",
-          webhookUrl: `https://discord.com/api/webhooks/${tokens.accessToken}`,
-        };
-        break;
-
-      case "calendar":
-        config = {
-          type: "calendar",
-          provider: "google",
-          calendarId: "primary",
-          accessToken: tokens.accessToken,
-          refreshToken: tokens.refreshToken || "",
-          expiresAt: tokens.expiresAt || Date.now() + 3600000,
-        };
-        break;
-
-      default:
-        throw new Error(`OAuth not supported for ${type}`);
+    // The stored state, not the caller, decides which provider this is
+    if (oauthState.type !== type) {
+      throw new Error("OAuth state does not match the integration type");
     }
+    const config = await this.exchangeCode(oauthState.type, code);
 
     return this.createIntegration({
-      type,
+      type: oauthState.type,
       ownerAddress: oauthState.ownerAddress,
       name: `${type.charAt(0).toUpperCase() + type.slice(1)} Integration`,
       config,
@@ -274,16 +336,92 @@ export class IntegrationService {
     });
   }
 
-  private async exchangeCodeForTokens(
-    _type: IntegrationType,
-    _code: string
-  ): Promise<OAuthTokens> {
-    // In production, this would call the OAuth provider's token endpoint
+  /**
+   * Exchange an authorization code with the provider for the integration's
+   * credentials and destination
+   */
+  private async exchangeCode(type: IntegrationType, code: string): Promise<IntegrationConfig> {
+    if (!code) {
+      throw new Error("Missing authorization code");
+    }
+    const client = oauthClient(type);
+
+    switch (type) {
+      case "slack": {
+        const result = await this.postForm(`${this.providers.slack}/oauth.v2.access`, {
+          client_id: client.id,
+          client_secret: client.secret,
+          code,
+          redirect_uri: this.redirectUri,
+        });
+        if (!result.ok) throw new Error(`Slack: ${result.error ?? "authorization failed"}`);
+        return {
+          type: "slack",
+          workspaceId: result.team?.id ?? "",
+          workspaceName: result.team?.name ?? "",
+          channelId: result.incoming_webhook?.channel_id ?? "",
+          channelName: result.incoming_webhook?.channel ?? "",
+          botToken: result.access_token,
+          webhookUrl: result.incoming_webhook?.url,
+          installedBy: result.authed_user?.id,
+        };
+      }
+
+      case "discord": {
+        const result = await this.postForm(`${this.providers.discord}/oauth2/token`, {
+          client_id: client.id,
+          client_secret: client.secret,
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: this.redirectUri,
+        });
+        if (!result.webhook?.url) throw new Error("Discord: no webhook was granted");
+        return {
+          type: "discord",
+          guildId: result.webhook.guild_id ?? result.guild?.id ?? "",
+          guildName: result.guild?.name ?? "",
+          channelId: result.webhook.channel_id ?? "",
+          channelName: result.webhook.name ?? "",
+          webhookUrl: result.webhook.url,
+        };
+      }
+
+      case "calendar": {
+        const tokens = await this.googleToken({
+          grant_type: "authorization_code",
+          code,
+          redirect_uri: this.redirectUri,
+        });
+        if (!tokens.refreshToken) throw new Error("Google: no refresh token was granted");
+        return {
+          type: "calendar",
+          provider: "google",
+          calendarId: "primary",
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken,
+          expiresAt: tokens.expiresAt ?? Date.now() + 3600_000,
+        };
+      }
+
+      default:
+        throw new Error(`OAuth not supported for ${type}`);
+    }
+  }
+
+  private async googleToken(fields: Record<string, string>): Promise<OAuthTokens> {
+    const client = oauthClient("calendar");
+    const result = await this.postForm(`${this.providers.googleOAuth}/token`, {
+      client_id: client.id,
+      client_secret: client.secret,
+      ...fields,
+    });
+    if (!result.access_token) throw new Error(`Google: ${result.error ?? "token request failed"}`);
     return {
-      accessToken: `tok_${Math.random().toString(36).substr(2, 32)}`,
-      refreshToken: `ref_${Math.random().toString(36).substr(2, 32)}`,
-      expiresAt: Date.now() + 3600000,
-      tokenType: "Bearer",
+      accessToken: result.access_token,
+      refreshToken: result.refresh_token,
+      expiresAt: Date.now() + Number(result.expires_in ?? 3600) * 1000,
+      tokenType: result.token_type ?? "Bearer",
+      scope: result.scope,
     };
   }
 
@@ -356,6 +494,9 @@ export class IntegrationService {
         case "webhook":
           await this.sendWebhook(integration, payload);
           break;
+
+        default:
+          throw new Error(`${integration.type} integrations do not receive messages`);
       }
 
       message.status = "sent";
@@ -380,7 +521,7 @@ export class IntegrationService {
     data: Record<string, unknown>
   ): Promise<IntegrationMessage[]> {
     const integrations = this.listIntegrations(ownerAddress).filter(
-      (i) => i.status === "connected" && i.events.includes(eventType)
+      (i) => i.status === "connected" && MESSAGING_TYPES.includes(i.type) && i.events.includes(eventType)
     );
 
     const payload = this.formatPayload(eventType, data);
@@ -396,6 +537,30 @@ export class IntegrationService {
     }
 
     return messages;
+  }
+
+  /**
+   * Deliver a platform event to every connected integration subscribed to
+   * it whose filters match. Events about non-public campaigns only reach the
+   * campaign creator's integrations.
+   */
+  async deliverEvent(
+    eventType: IntegrationEventType,
+    data: Record<string, unknown>,
+    audience?: string[]
+  ): Promise<IntegrationMessage[]> {
+    const allowed = audience?.map((a) => a.toLowerCase());
+    const integrations = Array.from(this.integrations.values()).filter(
+      (i) =>
+        i.status === "connected" &&
+        MESSAGING_TYPES.includes(i.type) &&
+        i.events.includes(eventType) &&
+        (!allowed || allowed.includes(i.ownerAddress.toLowerCase())) &&
+        this.matchesFilters(i.filters, data)
+    );
+
+    const payload = this.formatPayload(eventType, data);
+    return Promise.all(integrations.map((i) => this.sendMessage(i.id, payload)));
   }
 
   private matchesFilters(
@@ -416,15 +581,16 @@ export class IntegrationService {
       }
     }
 
-    if (filters.minAmount) {
-      const amount = parseFloat(data.amount as string) || 0;
-      if (amount < parseFloat(filters.minAmount)) {
+    if (filters.minAmount && /^\d+$/.test(filters.minAmount)) {
+      const amount = /^\d+$/.test(String(data.amount ?? "")) ? BigInt(String(data.amount)) : 0n;
+      if (amount < BigInt(filters.minAmount)) {
         return false;
       }
     }
 
     if (filters.creatorAddresses?.length) {
-      if (!filters.creatorAddresses.includes(data.creatorAddress as string)) {
+      const creator = String(data.creatorAddress ?? "").toLowerCase();
+      if (!filters.creatorAddresses.some((a) => a.toLowerCase() === creator)) {
         return false;
       }
     }
@@ -442,19 +608,22 @@ export class IntegrationService {
   ): Promise<boolean> {
     const config = integration.config as SlackConfig;
 
-    // In production, use Slack Web API
-    console.log(`[Slack] Sending to ${config.channelName}:`, message.text);
+    // Incoming webhooks post to the channel chosen at install time
+    if (config.webhookUrl) {
+      const { channel: _channel, ...rest } = message;
+      await this.postJson(config.webhookUrl, rest);
+      return true;
+    }
 
-    // Simulate API call
-    // const response = await fetch("https://slack.com/api/chat.postMessage", {
-    //   method: "POST",
-    //   headers: {
-    //     "Authorization": `Bearer ${config.botToken}`,
-    //     "Content-Type": "application/json",
-    //   },
-    //   body: JSON.stringify({ ...message, channel: config.channelId }),
-    // });
-
+    const body = await this.postJson(
+      `${this.providers.slack}/chat.postMessage`,
+      { ...message, channel: config.channelId },
+      { Authorization: `Bearer ${config.botToken}` }
+    );
+    const result = JSON.parse(body);
+    if (!result.ok) {
+      throw new Error(`Slack: ${result.error ?? "message rejected"}`);
+    }
     return true;
   }
 
@@ -463,16 +632,7 @@ export class IntegrationService {
     payload: DiscordWebhookPayload
   ): Promise<boolean> {
     const config = integration.config as DiscordConfig;
-
-    // In production, POST to Discord webhook
-    console.log(`[Discord] Sending to ${config.channelName}:`, payload.content);
-
-    // const response = await fetch(config.webhookUrl, {
-    //   method: "POST",
-    //   headers: { "Content-Type": "application/json" },
-    //   body: JSON.stringify(payload),
-    // });
-
+    await this.postJson(config.webhookUrl, payload);
     return true;
   }
 
@@ -481,16 +641,7 @@ export class IntegrationService {
     payload: ZapierPayload
   ): Promise<boolean> {
     const config = integration.config as ZapierConfig;
-
-    // In production, POST to Zapier webhook
-    console.log(`[Zapier] Sending webhook:`, payload.event);
-
-    // const response = await fetch(config.webhookUrl, {
-    //   method: "POST",
-    //   headers: { "Content-Type": "application/json" },
-    //   body: JSON.stringify(payload),
-    // });
-
+    await this.postJson(config.webhookUrl, payload);
     return true;
   }
 
@@ -499,50 +650,51 @@ export class IntegrationService {
     payload: IntegrationPayload
   ): Promise<boolean> {
     const config = integration.config as TelegramConfig;
+    const formatted = payload.formatted;
+    const bold = (text: string) => htmlEscape(text).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+    const lines = formatted
+      ? [
+          `<b>${htmlEscape(formatted.title)}</b>`,
+          bold(formatted.description),
+          ...(formatted.fields ?? []).map((f) => `${htmlEscape(f.name)}: ${htmlEscape(String(f.value ?? ""))}`),
+          ...(formatted.url ? [htmlEscape(formatted.url)] : []),
+        ]
+      : [htmlEscape(payload.eventType)];
 
-    // In production, use Telegram Bot API
-    console.log(`[Telegram] Sending to ${config.chatId}:`, payload.formatted?.title);
-
-    // const response = await fetch(
-    //   `https://api.telegram.org/bot${config.botToken}/sendMessage`,
-    //   {
-    //     method: "POST",
-    //     headers: { "Content-Type": "application/json" },
-    //     body: JSON.stringify({
-    //       chat_id: config.chatId,
-    //       text: payload.formatted?.description,
-    //       parse_mode: "HTML",
-    //     }),
-    //   }
-    // );
-
+    const body = await this.postJson(
+      `${this.providers.telegram}/bot${encodeURIComponent(config.botToken)}/sendMessage`,
+      { chat_id: config.chatId, text: lines.join("\n"), parse_mode: "HTML" }
+    );
+    const result = JSON.parse(body);
+    if (!result.ok) {
+      throw new Error(`Telegram: ${result.description ?? "message rejected"}`);
+    }
     return true;
   }
 
+  /**
+   * POST the payload as JSON. With a secret, the request carries
+   * X-Pledge-Timestamp and X-Pledge-Signature (see integrationSignature).
+   */
   async sendWebhook(
     integration: Integration,
     payload: IntegrationPayload
   ): Promise<boolean> {
     const config = integration.config as WebhookConfig;
+    const body = JSON.stringify(payload);
+    const timestamp = String(Math.floor(Date.now() / 1000));
 
-    // In production, POST to custom webhook
-    console.log(`[Webhook] Sending to ${config.url}:`, payload.eventType);
+    const headers: Record<string, string> = {
+      ...config.headers,
+      "Content-Type": "application/json",
+      "X-Pledge-Event": payload.eventType,
+      "X-Pledge-Timestamp": timestamp,
+    };
+    if (config.secret) {
+      headers["X-Pledge-Signature"] = integrationSignature(config.secret, timestamp, body);
+    }
 
-    // const headers: Record<string, string> = {
-    //   "Content-Type": "application/json",
-    //   ...config.headers,
-    // };
-    //
-    // if (config.secret) {
-    //   headers["X-Webhook-Secret"] = config.secret;
-    // }
-    //
-    // const response = await fetch(config.url, {
-    //   method: "POST",
-    //   headers,
-    //   body: JSON.stringify(payload),
-    // });
-
+    await this.call(config.url, { headers, body });
     return true;
   }
 
@@ -551,25 +703,31 @@ export class IntegrationService {
     event: CalendarEvent
   ): Promise<CalendarEvent> {
     const config = integration.config as CalendarConfig;
+    if (config.provider !== "google") {
+      throw new Error(`${config.provider} calendars are not supported`);
+    }
 
-    // In production, use Google Calendar API
-    console.log(`[Calendar] Creating event:`, event.title);
+    // Refresh the access token shortly before it expires
+    if (config.expiresAt - 60_000 < Date.now()) {
+      const tokens = await this.googleToken({ grant_type: "refresh_token", refresh_token: config.refreshToken });
+      config.accessToken = tokens.accessToken;
+      config.expiresAt = tokens.expiresAt ?? Date.now() + 3600_000;
+      if (tokens.refreshToken) config.refreshToken = tokens.refreshToken;
+      integration.metadata.updatedAt = Date.now();
+      this.integrations.set(integration.id, integration);
+    }
 
-    // const response = await fetch(
-    //   `https://www.googleapis.com/calendar/v3/calendars/${config.calendarId}/events`,
-    //   {
-    //     method: "POST",
-    //     headers: {
-    //       Authorization: `Bearer ${config.accessToken}`,
-    //       "Content-Type": "application/json",
-    //     },
-    //     body: JSON.stringify(event),
-    //   }
-    // );
+    const { title, ...rest } = event;
+    const body = await this.postJson(
+      `${this.providers.googleCalendar}/calendars/${encodeURIComponent(config.calendarId)}/events`,
+      { ...rest, summary: title },
+      { Authorization: `Bearer ${config.accessToken}` }
+    );
+    const created = JSON.parse(body);
 
     return {
       ...event,
-      id: `evt_${Date.now()}`,
+      id: created.id,
     };
   }
 
@@ -811,10 +969,10 @@ export class IntegrationService {
     return `${address.substring(0, 6)}...${address.substring(address.length - 4)}`;
   }
 
+  /** Amounts are wei strings */
   private formatCurrency(amount: string | undefined): string {
-    if (!amount) return "$0.00";
-    const num = parseFloat(amount);
-    return `$${num.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    if (!amount || !/^\d+$/.test(amount)) return "0 ETH";
+    return `${formatEther(amount)} ETH`;
   }
 
   private formatDate(timestamp: number | undefined): string {
@@ -869,11 +1027,14 @@ export class IntegrationService {
 // FACTORY
 // ============================================================================
 
-export function createIntegrationService(config: { baseUrl: string }): IntegrationService {
+export function createIntegrationService(config: {
+  baseUrl: string;
+  providers?: Partial<ProviderEndpoints>;
+}): IntegrationService {
   return new IntegrationService(config);
 }
 
 // Default instance
 export const integrationService = new IntegrationService({
-  baseUrl: process.env.BASE_URL || "https://app.pledgeprotocol.io",
+  baseUrl: /^https?:\/\//.test(process.env.BASE_URL ?? "") ? process.env.BASE_URL! : "https://app.pledgeprotocol.io",
 });

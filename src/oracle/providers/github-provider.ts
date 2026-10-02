@@ -65,7 +65,7 @@ export class GitHubProvider extends ApiOracleProvider {
     repo: string,
     prNumber: number
   ): Promise<OracleResponse> {
-    const endpoint = `${this.baseUrl}/repos/${owner}/${repo}/pulls/${prNumber}`;
+    const endpoint = `${this.baseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${encodeURIComponent(prNumber)}`;
 
     try {
       const response = await fetch(endpoint, {
@@ -123,7 +123,7 @@ export class GitHubProvider extends ApiOracleProvider {
     commitSha: string,
     branch: string = "main"
   ): Promise<OracleResponse> {
-    const endpoint = `${this.baseUrl}/repos/${owner}/${repo}/compare/${branch}...${commitSha}`;
+    const endpoint = `${this.baseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/compare/${encodeURIComponent(branch)}...${encodeURIComponent(commitSha)}`;
 
     try {
       const response = await fetch(endpoint, {
@@ -179,7 +179,7 @@ export class GitHubProvider extends ApiOracleProvider {
     repo: string,
     runId: number
   ): Promise<OracleResponse> {
-    const endpoint = `${this.baseUrl}/repos/${owner}/${repo}/actions/runs/${runId}`;
+    const endpoint = `${this.baseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/runs/${encodeURIComponent(runId)}`;
 
     try {
       const response = await fetch(endpoint, {
@@ -233,7 +233,7 @@ export class GitHubProvider extends ApiOracleProvider {
     owner: string,
     repo: string
   ): Promise<OracleResponse> {
-    const endpoint = `${this.baseUrl}/repos/${owner}/${repo}/releases/latest`;
+    const endpoint = `${this.baseUrl}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases/latest`;
 
     try {
       const response = await fetch(endpoint, {

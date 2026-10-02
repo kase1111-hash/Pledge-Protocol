@@ -31,7 +31,13 @@ import {
   CreateStretchGoalParams,
   CreateSeriesParams,
   CreateReminderParams,
+  AdvancedCampaignServiceInterface,
 } from "./types";
+import { formatEther } from "ethers";
+import { Campaign, getStore, Milestone, Pledge } from "../database";
+import { oracleRouter } from "../oracle";
+import { notificationService } from "../notifications";
+import { campaignEvent, milestoneEvent } from "../events";
 
 // ============================================================================
 // DEFAULT SETTINGS
@@ -52,11 +58,49 @@ const DEFAULT_SERIES_SETTINGS: SeriesSettings = {
   bundleAvailable: false,
 };
 
+/** Scheduled actions the service can carry out */
+export const SUPPORTED_ACTIONS: ScheduledActionType[] = ["launch", "close", "notify", "milestone_check"];
+
+const HOUR_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * HOUR_MS;
+
+function nowSeconds(): number {
+  return Math.floor(Date.now() / 1000);
+}
+
+/** Percentage of target reached, capped at 100 */
+function percentOf(current: bigint, target: bigint): number {
+  if (target <= 0n) return 100;
+  return Math.min(100, Number((current * 10000n) / target) / 100);
+}
+
+async function storedCampaign(campaignId: string): Promise<Campaign> {
+  const campaign = await getStore().getCampaign(campaignId);
+  if (!campaign) {
+    throw new Error(`Campaign ${campaignId} not found`);
+  }
+  return campaign;
+}
+
+/** Pledges that count towards a campaign's funding */
+async function countedPledges(campaignId: string): Promise<Pledge[]> {
+  const { items } = await getStore().listPledges({ campaignId });
+  return items.filter((p) => p.status !== "cancelled");
+}
+
+function distinctBackers(pledges: Pledge[]): number {
+  return new Set(pledges.map((p) => p.backer.toLowerCase())).size;
+}
+
+function sumEscrowed(pledges: Pledge[]): bigint {
+  return pledges.reduce((sum, p) => sum + BigInt(p.escrowedAmount), 0n);
+}
+
 // ============================================================================
 // ADVANCED CAMPAIGN SERVICE
 // ============================================================================
 
-export class AdvancedCampaignService {
+export class AdvancedCampaignService implements AdvancedCampaignServiceInterface {
   private recurringCampaigns: Map<string, RecurringCampaign> = new Map();
   private stretchGoals: Map<string, StretchGoal> = new Map();
   private scheduledActions: Map<string, ScheduledAction> = new Map();
@@ -68,7 +112,10 @@ export class AdvancedCampaignService {
   // RECURRING CAMPAIGNS
   // ==========================================================================
 
-  createRecurringCampaign(params: CreateRecurringCampaignParams): RecurringCampaign {
+  async createRecurringCampaign(params: CreateRecurringCampaignParams): Promise<RecurringCampaign> {
+    // Instances are copies of the template campaign
+    await storedCampaign(params.templateCampaignId);
+
     const recurring: RecurringCampaign = {
       id: `rec_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       templateCampaignId: params.templateCampaignId,
@@ -98,7 +145,7 @@ export class AdvancedCampaignService {
 
     // Create first instance if auto-create is enabled and start date is now or past
     if (recurring.settings.autoCreateInstances && recurring.schedule.startDate <= Date.now()) {
-      this.createNextInstance(recurring.id);
+      await this.createNextInstance(recurring.id);
       recurring.status = "active";
     }
 
@@ -111,7 +158,7 @@ export class AdvancedCampaignService {
 
   listRecurringCampaigns(ownerAddress: string): RecurringCampaign[] {
     return Array.from(this.recurringCampaigns.values()).filter(
-      (r) => r.ownerAddress === ownerAddress
+      (r) => r.ownerAddress.toLowerCase() === ownerAddress.toLowerCase()
     );
   }
 
@@ -178,7 +225,7 @@ export class AdvancedCampaignService {
     return recurring;
   }
 
-  createNextInstance(id: string): RecurringInstance {
+  async createNextInstance(id: string): Promise<RecurringInstance> {
     const recurring = this.recurringCampaigns.get(id);
     if (!recurring) {
       throw new Error("Recurring campaign not found");
@@ -203,8 +250,7 @@ export class AdvancedCampaignService {
     const startDate = this.calculateNextStartDate(recurring);
     const endDate = startDate + recurring.settings.instanceDurationDays * 24 * 60 * 60 * 1000;
 
-    // In production, this would create an actual campaign
-    const campaignId = `campaign_${recurring.id}_${instanceNumber}`;
+    const campaignId = await this.createInstanceCampaign(recurring, instanceNumber, startDate, endDate);
 
     const instance: RecurringInstance = {
       id: `inst_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -228,6 +274,62 @@ export class AdvancedCampaignService {
 
     this.recurringCampaigns.set(id, recurring);
     return instance;
+  }
+
+  /**
+   * Store a new campaign copied from the template, with its pledge window
+   * moved to the instance's dates. A future instance is stored as a draft
+   * with a scheduled launch.
+   */
+  private async createInstanceCampaign(
+    recurring: RecurringCampaign,
+    instanceNumber: number,
+    startDate: number,
+    endDate: number
+  ): Promise<string> {
+    const template = await storedCampaign(recurring.templateCampaignId);
+    const start = Math.floor(startDate / 1000);
+    const end = Math.floor(endDate / 1000);
+    const shift = end - template.pledgeWindowEnd;
+    const timestamp = nowSeconds();
+
+    const campaign: Campaign = {
+      ...template,
+      id: `campaign_${recurring.id.replace(/^rec_/, "")}_${instanceNumber}`,
+      chainId: null,
+      name: `${recurring.name} #${instanceNumber}`,
+      creator: recurring.ownerAddress,
+      pledgeWindowStart: start,
+      pledgeWindowEnd: end,
+      eventDate: template.eventDate === null ? null : template.eventDate + shift,
+      resolutionDeadline: template.resolutionDeadline + shift,
+      milestones: template.milestones.map((m) => ({
+        ...m,
+        status: "pending",
+        verifiedAt: null,
+        oracleData: null,
+      })),
+      status: startDate <= Date.now() ? "active" : "draft",
+      totalEscrowed: "0",
+      totalReleased: "0",
+      totalRefunded: "0",
+      pledgeCount: 0,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      resolvedAt: null,
+    };
+    await getStore().saveCampaign(campaign);
+
+    if (campaign.status === "draft") {
+      this.scheduleAction(campaign.id, {
+        campaignId: campaign.id,
+        type: "launch",
+        scheduledFor: startDate,
+        createdBy: "system",
+      });
+    }
+
+    return campaign.id;
   }
 
   private calculateNextStartDate(recurring: RecurringCampaign): number {
@@ -268,6 +370,16 @@ export class AdvancedCampaignService {
   // ==========================================================================
 
   addStretchGoal(campaignId: string, params: CreateStretchGoalParams): StretchGoal {
+    if (params.type === "amount" || params.type === "backers") {
+      if (!/^\d+$/.test(String(params.threshold)) || BigInt(params.threshold) <= 0n) {
+        throw new Error(
+          params.type === "amount"
+            ? "Amount thresholds are positive whole numbers in wei"
+            : "Backer thresholds are positive whole numbers"
+        );
+      }
+    }
+
     const existingGoals = this.getStretchGoals(campaignId);
     const order = params.order ?? existingGoals.length;
 
@@ -277,7 +389,7 @@ export class AdvancedCampaignService {
       name: params.name,
       description: params.description,
       type: params.type,
-      threshold: params.threshold,
+      threshold: String(params.threshold),
       reward: params.reward,
       status: "locked",
       order,
@@ -289,6 +401,10 @@ export class AdvancedCampaignService {
 
     this.stretchGoals.set(goal.id, goal);
     return goal;
+  }
+
+  getStretchGoal(goalId: string): StretchGoal | null {
+    return this.stretchGoals.get(goalId) || null;
   }
 
   getStretchGoals(campaignId: string): StretchGoal[] {
@@ -322,40 +438,56 @@ export class AdvancedCampaignService {
     return this.stretchGoals.delete(goalId);
   }
 
-  checkStretchGoalProgress(campaignId: string): StretchGoalProgress {
+  async checkStretchGoalProgress(campaignId: string): Promise<StretchGoalProgress> {
     const goals = this.getStretchGoals(campaignId);
+    const campaign = await storedCampaign(campaignId);
+    const pledges = await countedPledges(campaignId);
+    const currentAmount = sumEscrowed(pledges);
+    const currentBackers = distinctBackers(pledges);
 
-    // In production, fetch actual campaign data
-    const currentAmount = "35000"; // Example
-    const currentBackers = 150;
+    // What is left to reach a goal, in the goal's own unit
+    const remainingFor = (goal: StretchGoal): string => {
+      switch (goal.type) {
+        case "amount": {
+          const left = BigInt(goal.threshold) - currentAmount;
+          return (left > 0n ? left : 0n).toString();
+        }
+        case "backers":
+          return String(Math.max(0, Number(goal.threshold) - currentBackers));
+        default:
+          return "0";
+      }
+    };
 
     const goalProgress = goals.map((goal) => {
       let progress: number;
-      const threshold = parseFloat(goal.threshold);
 
       switch (goal.type) {
         case "amount":
-          progress = (parseFloat(currentAmount) / threshold) * 100;
+          progress = percentOf(currentAmount, BigInt(goal.threshold));
           break;
         case "backers":
-          progress = (currentBackers / threshold) * 100;
+          progress = percentOf(BigInt(currentBackers), BigInt(goal.threshold));
           break;
+        case "milestone": {
+          const milestone = campaign.milestones.find((m) => m.id === goal.threshold);
+          progress = milestone?.status === "verified" ? 100 : 0;
+          break;
+        }
         default:
           progress = 0;
       }
 
-      progress = Math.min(progress, 100);
-
       // Update status
+      if (progress > 0 && goal.status === "locked") {
+        goal.status = "unlocked";
+        goal.unlockedAt = Date.now();
+      }
       if (progress >= 100 && goal.status === "unlocked") {
         goal.status = "achieved";
         goal.achievedAt = Date.now();
-        this.stretchGoals.set(goal.id, goal);
-      } else if (progress > 0 && goal.status === "locked") {
-        goal.status = "unlocked";
-        goal.unlockedAt = Date.now();
-        this.stretchGoals.set(goal.id, goal);
       }
+      this.stretchGoals.set(goal.id, goal);
 
       return {
         id: goal.id,
@@ -367,26 +499,22 @@ export class AdvancedCampaignService {
     });
 
     // Find next unachieved goal
-    const nextGoal = goalProgress.find((g) => g.status !== "achieved");
+    const nextIndex = goalProgress.findIndex((g) => g.status !== "achieved");
     let nextGoalInfo: StretchGoalProgress["nextGoal"];
 
-    if (nextGoal) {
-      const remaining =
-        nextGoal.progress < 100
-          ? parseFloat(nextGoal.threshold) - parseFloat(currentAmount)
-          : 0;
-
+    if (nextIndex >= 0) {
+      const nextGoal = goalProgress[nextIndex];
       nextGoalInfo = {
         id: nextGoal.id,
         name: nextGoal.name,
-        remaining: String(Math.max(0, remaining)),
+        remaining: remainingFor(goals[nextIndex]),
         progress: nextGoal.progress,
       };
     }
 
     return {
       campaignId,
-      currentAmount,
+      currentAmount: currentAmount.toString(),
       currentBackers,
       goals: goalProgress,
       nextGoal: nextGoalInfo,
@@ -450,15 +578,29 @@ export class AdvancedCampaignService {
     campaignId: string,
     action: Omit<ScheduledAction, "id" | "status" | "createdAt">
   ): ScheduledAction {
+    if (!SUPPORTED_ACTIONS.includes(action.type)) {
+      throw new Error(
+        `Scheduled "${action.type}" actions are not supported (supported: ${SUPPORTED_ACTIONS.join(", ")})`
+      );
+    }
+    if (typeof action.scheduledFor !== "number" || !Number.isFinite(action.scheduledFor)) {
+      throw new Error("scheduledFor must be a timestamp in milliseconds");
+    }
+
     const scheduled: ScheduledAction = {
       id: `sa_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
       ...action,
+      campaignId,
       status: "pending",
       createdAt: Date.now(),
     };
 
     this.scheduledActions.set(scheduled.id, scheduled);
     return scheduled;
+  }
+
+  getScheduledAction(actionId: string): ScheduledAction | null {
+    return this.scheduledActions.get(actionId) || null;
   }
 
   getScheduledActions(campaignId: string): ScheduledAction[] {
@@ -478,11 +620,10 @@ export class AdvancedCampaignService {
     return true;
   }
 
-  async processScheduledActions(): Promise<ScheduledAction[]> {
-    const now = Date.now();
-    const dueActions = Array.from(this.scheduledActions.values()).filter(
-      (a) => a.status === "pending" && a.scheduledFor <= now
-    );
+  async processScheduledActions(now: number = Date.now()): Promise<ScheduledAction[]> {
+    const dueActions = Array.from(this.scheduledActions.values())
+      .filter((a) => a.status === "pending" && a.scheduledFor <= now)
+      .sort((a, b) => a.scheduledFor - b.scheduledFor);
 
     const processed: ScheduledAction[] = [];
 
@@ -504,29 +645,143 @@ export class AdvancedCampaignService {
   }
 
   private async executeAction(action: ScheduledAction): Promise<void> {
-    // In production, these would trigger actual campaign operations
     switch (action.type) {
       case "launch":
-        console.log(`[Scheduler] Launching campaign ${action.campaignId}`);
-        break;
-      case "pause":
-        console.log(`[Scheduler] Pausing campaign ${action.campaignId}`);
-        break;
-      case "resume":
-        console.log(`[Scheduler] Resuming campaign ${action.campaignId}`);
-        break;
+        return this.launchCampaign(action.campaignId);
       case "close":
-        console.log(`[Scheduler] Closing campaign ${action.campaignId}`);
-        break;
+        return this.closePledging(action.campaignId);
       case "notify":
-        console.log(`[Scheduler] Sending notification for ${action.campaignId}:`, action.params);
-        break;
+        return this.sendReminder(action.campaignId, action.params ?? {});
       case "milestone_check":
-        console.log(`[Scheduler] Checking milestone for ${action.campaignId}`);
-        break;
+        await this.checkMilestone(
+          action.campaignId,
+          String(action.params?.milestoneId),
+          action.params?.autoVerify === true
+        );
+        return;
       default:
-        console.log(`[Scheduler] Unknown action type: ${action.type}`);
+        throw new Error(`Scheduled "${action.type}" actions are not supported`);
     }
+  }
+
+  /** Draft → active, as POST /campaigns/:id/activate does */
+  private async launchCampaign(campaignId: string): Promise<void> {
+    await getStore().transaction(async (tx) => {
+      const campaign = await tx.getCampaign(campaignId, { forUpdate: true });
+      if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
+      if (campaign.status !== "draft") throw new Error(`Campaign is ${campaign.status}, not draft`);
+      if (nowSeconds() > campaign.pledgeWindowEnd) throw new Error("Pledge window has already ended");
+      campaign.status = "active";
+      campaign.updatedAt = nowSeconds();
+      await tx.saveCampaign(campaign);
+      return campaign;
+    }).then((campaign) => campaignEvent("campaign_activated", campaign));
+  }
+
+  /** Active → pledging closed: no new pledges, resolution unaffected */
+  private async closePledging(campaignId: string): Promise<void> {
+    await getStore().transaction(async (tx) => {
+      const campaign = await tx.getCampaign(campaignId, { forUpdate: true });
+      if (!campaign) throw new Error(`Campaign ${campaignId} not found`);
+      if (campaign.status !== "active") throw new Error(`Campaign is ${campaign.status}, not active`);
+      campaign.status = "pledging_closed";
+      campaign.updatedAt = nowSeconds();
+      await tx.saveCampaign(campaign);
+      return campaign;
+    }).then((campaign) => campaignEvent("campaign_deadline_reached", campaign));
+  }
+
+  /** In-app notification to the campaign's creator and/or backers */
+  private async sendReminder(campaignId: string, params: Record<string, unknown>): Promise<void> {
+    const campaign = await storedCampaign(campaignId);
+    const recipientType = (params.recipientType as MilestoneReminder["recipientType"]) ?? "creator";
+
+    const recipients = new Set<string>();
+    if (recipientType === "creator" || recipientType === "both") {
+      recipients.add(campaign.creator.toLowerCase());
+    }
+    if (recipientType === "backers" || recipientType === "both") {
+      for (const pledge of await countedPledges(campaignId)) {
+        recipients.add(pledge.backer.toLowerCase());
+      }
+    }
+
+    const hours = typeof params.hoursRemaining === "number" ? params.hoursRemaining : null;
+    const message =
+      typeof params.message === "string" && params.message
+        ? params.message
+        : params.notificationType === "launch_reminder" && hours !== null
+          ? `${campaign.name} launches in ${hours} hour${hours === 1 ? "" : "s"}`
+          : `Reminder for ${campaign.name}`;
+
+    await notificationService.emit({
+      type: "campaign_reminder",
+      source: "campaigns-advanced",
+      campaignId,
+      milestoneId: typeof params.milestoneId === "string" ? params.milestoneId : undefined,
+      actorType: "system",
+      recipients: Array.from(recipients),
+      audience: [campaign.creator],
+      data: { ...params, campaignName: campaign.name },
+      summary: message,
+      priority: "normal",
+    });
+  }
+
+  /**
+   * Refresh a scheduled milestone from the campaign and, with autoVerify,
+   * check a pending milestone against its (non-attestation) oracle
+   */
+  private async checkMilestone(
+    campaignId: string,
+    milestoneId: string,
+    autoVerify: boolean
+  ): Promise<Milestone["status"]> {
+    const campaign = await storedCampaign(campaignId);
+    const milestone = campaign.milestones.find((m) => m.id === milestoneId);
+    if (!milestone) throw new Error(`Milestone ${milestoneId} not found`);
+
+    let status = milestone.status;
+    const oracle = await getStore().getOracle(milestone.oracleId);
+    const checkable =
+      autoVerify &&
+      status === "pending" &&
+      oracle?.type !== "attestation" &&
+      (campaign.status === "active" || campaign.status === "pledging_closed");
+
+    if (checkable) {
+      const result = await oracleRouter.verifyMilestone(
+        milestone.oracleId,
+        campaign.id,
+        milestone.id,
+        milestone.condition,
+        milestone.oracleParams
+      );
+      if (result.verified) {
+        const recorded = await getStore().transaction(async (tx) => {
+          const current = await tx.getCampaign(campaign.id, { forUpdate: true });
+          const target = current?.milestones.find((m) => m.id === milestone.id);
+          if (!current || !target || target.status !== "pending") return false;
+          target.status = "verified";
+          target.verifiedAt = nowSeconds();
+          target.oracleData = result.oracleData;
+          current.updatedAt = nowSeconds();
+          await tx.saveCampaign(current);
+          return true;
+        });
+        if (recorded) milestoneEvent("milestone_verified", campaign, milestone.id);
+        status = "verified";
+      } else if (result.error) {
+        throw new Error(`Oracle check failed: ${result.error}`);
+      }
+    }
+
+    const schedule = this.milestoneSchedules.get(scheduleKey(campaignId, milestoneId));
+    if (schedule) {
+      schedule.status = status === "verified" ? "verified" : status === "failed" ? "failed" : "pending";
+      this.milestoneSchedules.set(scheduleKey(campaignId, milestoneId), schedule);
+    }
+    return status;
   }
 
   // ==========================================================================
@@ -562,11 +817,39 @@ export class AdvancedCampaignService {
     return this.campaignSeries.get(id) || null;
   }
 
-  addCampaignToSeries(
+  /**
+   * A series with its campaigns' names, statuses and totals read from the
+   * store
+   */
+  async getSeriesWithTotals(id: string): Promise<CampaignSeries | null> {
+    const series = this.campaignSeries.get(id);
+    if (!series) return null;
+
+    let totalRaised = 0n;
+    const backers = new Set<string>();
+    for (const entry of series.campaigns) {
+      const campaign = await getStore().getCampaign(entry.campaignId);
+      if (!campaign) continue;
+      entry.name = campaign.name;
+      entry.status = campaign.status;
+      const pledges = await countedPledges(campaign.id);
+      totalRaised += sumEscrowed(pledges);
+      pledges.forEach((p) => backers.add(p.backer.toLowerCase()));
+    }
+
+    series.metadata.totalRaised = totalRaised.toString();
+    series.metadata.totalBackers = backers.size;
+    series.metadata.averagePerCampaign =
+      series.campaigns.length > 0 ? (totalRaised / BigInt(series.campaigns.length)).toString() : "0";
+    this.campaignSeries.set(id, series);
+    return series;
+  }
+
+  async addCampaignToSeries(
     seriesId: string,
     campaignId: string,
     relationship: SeriesCampaign["relationship"]
-  ): CampaignSeries {
+  ): Promise<CampaignSeries> {
     const series = this.campaignSeries.get(seriesId);
     if (!series) {
       throw new Error("Series not found");
@@ -577,11 +860,12 @@ export class AdvancedCampaignService {
       throw new Error("Campaign already in series");
     }
 
+    const campaign = await storedCampaign(campaignId);
     const seriesCampaign: SeriesCampaign = {
       campaignId,
-      name: `Campaign ${series.campaigns.length + 1}`, // In production, fetch actual name
+      name: campaign.name,
       order: series.campaigns.length,
-      status: "active",
+      status: campaign.status,
       relationship,
       addedAt: Date.now(),
     };
@@ -625,24 +909,29 @@ export class AdvancedCampaignService {
   // MILESTONE SCHEDULING
   // ==========================================================================
 
-  scheduleMilestoneVerification(
+  async scheduleMilestoneVerification(
+    campaignId: string,
     milestoneId: string,
     scheduledDate: number,
     autoVerify: boolean = false
-  ): MilestoneSchedule {
-    const campaignId = milestoneId.split("_")[1] || "unknown"; // Extract from ID
+  ): Promise<MilestoneSchedule> {
+    const campaign = await storedCampaign(campaignId);
+    const milestone = campaign.milestones.find((m) => m.id === milestoneId);
+    if (!milestone) {
+      throw new Error(`Milestone ${milestoneId} not found in campaign ${campaignId}`);
+    }
 
     const schedule: MilestoneSchedule = {
       milestoneId,
       campaignId,
-      name: `Milestone ${milestoneId}`,
+      name: milestone.name,
       scheduledVerification: scheduledDate,
       remindersSent: [],
       autoVerify,
       status: "scheduled",
     };
 
-    this.milestoneSchedules.set(milestoneId, schedule);
+    this.milestoneSchedules.set(scheduleKey(campaignId, milestoneId), schedule);
 
     // Schedule the verification action
     this.scheduleAction(campaignId, {
@@ -689,94 +978,101 @@ export class AdvancedCampaignService {
     return reminder;
   }
 
-  async processScheduledMilestones(): Promise<MilestoneSchedule[]> {
-    const now = Date.now();
-    const dueSchedules = Array.from(this.milestoneSchedules.values()).filter(
-      (s) => s.status === "scheduled" && s.scheduledVerification <= now
-    );
-
-    const processed: MilestoneSchedule[] = [];
-
-    for (const schedule of dueSchedules) {
-      schedule.status = "verifying";
-
-      if (schedule.autoVerify && schedule.oracleConfig) {
-        // In production, trigger oracle verification
-        console.log(`[Milestone] Auto-verifying ${schedule.milestoneId}`);
-        schedule.status = "verified";
-      }
-
-      this.milestoneSchedules.set(schedule.milestoneId, schedule);
-      processed.push(schedule);
-    }
-
-    return processed;
-  }
 
   // ==========================================================================
   // PREDICTIONS
   // ==========================================================================
 
-  getPrediction(campaignId: string): CampaignPrediction {
-    // In production, this would use ML models based on historical data
-    const velocity = this.getFundingVelocity(campaignId, "day");
+  /**
+   * Linear projection of a campaign's funding from its pledges so far.
+   * Campaigns have no funding goal, so fundingProbability is null.
+   */
+  async getPrediction(campaignId: string): Promise<CampaignPrediction> {
+    const campaign = await storedCampaign(campaignId);
+    const pledges = await countedPledges(campaignId);
+    const now = Date.now();
 
-    // Simple linear projection
-    const avgDaily = velocity.averageVelocity * 24; // Per day
-    const daysRemaining = 14; // Example
-    const projected = parseFloat("25000") + avgDaily * daysRemaining;
+    const totalPledged = sumEscrowed(pledges);
+    const backers = distinctBackers(pledges);
+    const windowStart = campaign.pledgeWindowStart * 1000;
+    const windowEnd = campaign.pledgeWindowEnd * 1000;
+    const open = campaign.status === "active" && now < windowEnd;
+
+    const elapsedDays = Math.max((Math.min(now, windowEnd) - windowStart) / DAY_MS, 1 / 24);
+    const remainingDays = open ? (windowEnd - now) / DAY_MS : 0;
+
+    // Scale by the share of the window still to come, in integer maths
+    const scale = BigInt(Math.round((remainingDays / elapsedDays) * 1_000_000));
+    const projectedAmount = totalPledged + (totalPledged * scale) / 1_000_000n;
+    const projectedBackers = backers + Math.round((backers * remainingDays) / elapsedDays);
+
+    const velocity = await this.getFundingVelocity(campaignId, "day");
+    const factors: CampaignPrediction["factors"] = [];
+    if (!open) {
+      factors.push({ factor: "Pledge window closed: no further pledges expected", impact: "neutral", weight: 1 });
+    } else {
+      if (velocity.trend !== "steady") {
+        factors.push({
+          factor: `Daily pledging is ${velocity.trend}`,
+          impact: velocity.trend === "accelerating" ? "positive" : "negative",
+          weight: 0.5,
+        });
+      }
+      if (pledges.length < 5) {
+        factors.push({ factor: "Few pledges so far", impact: "neutral", weight: 0.5 });
+      }
+    }
+
+    // More pledges and more of the window elapsed → more reliable projection
+    const windowElapsed = Math.min(1, elapsedDays / Math.max(elapsedDays + remainingDays, 1 / 24));
+    const confidence = open
+      ? Math.round(100 * windowElapsed * Math.min(1, pledges.length / 20))
+      : 100;
 
     return {
       campaignId,
-      predictedFinalAmount: String(Math.round(projected)),
-      confidence: 72,
-      predictedBackers: 180,
-      fundingProbability: 85,
-      factors: [
-        { factor: "Strong initial velocity", impact: "positive", weight: 0.3 },
-        { factor: "Active creator engagement", impact: "positive", weight: 0.2 },
-        { factor: "Similar campaigns success rate", impact: "positive", weight: 0.15 },
-        { factor: "Approaching weekend", impact: "negative", weight: 0.1 },
-        { factor: "Category average", impact: "neutral", weight: 0.25 },
-      ],
-      generatedAt: Date.now(),
+      predictedFinalAmount: projectedAmount.toString(),
+      confidence,
+      predictedBackers: projectedBackers,
+      fundingProbability: null,
+      projectedEndDate: windowEnd,
+      factors,
+      generatedAt: now,
     };
   }
 
-  getFundingVelocity(campaignId: string, period: FundingVelocity["period"]): FundingVelocity {
-    // Generate sample data points
-    const dataPoints: FundingVelocity["dataPoints"] = [];
+  /**
+   * Pledged amounts per period, from the campaign's pledges. Velocity is in
+   * ETH per hour.
+   */
+  async getFundingVelocity(campaignId: string, period: FundingVelocity["period"]): Promise<FundingVelocity> {
+    await storedCampaign(campaignId);
+    const pledges = await countedPledges(campaignId);
     const now = Date.now();
 
-    let periodMs: number;
-    let pointCount: number;
+    const { periodMs, pointCount } = {
+      hour: { periodMs: HOUR_MS, pointCount: 24 },
+      day: { periodMs: DAY_MS, pointCount: 30 },
+      week: { periodMs: 7 * DAY_MS, pointCount: 12 },
+    }[period];
+    const hoursPerPeriod = periodMs / HOUR_MS;
+    const windowStart = now - pointCount * periodMs;
 
-    switch (period) {
-      case "hour":
-        periodMs = 60 * 60 * 1000;
-        pointCount = 24;
-        break;
-      case "day":
-        periodMs = 24 * 60 * 60 * 1000;
-        pointCount = 30;
-        break;
-      case "week":
-        periodMs = 7 * 24 * 60 * 60 * 1000;
-        pointCount = 12;
-        break;
-    }
+    // Pledges before the window count towards the starting cumulative total
+    let cumulative = sumEscrowed(pledges.filter((p) => p.createdAt * 1000 <= windowStart));
 
-    let cumulative = 0;
-    let totalVelocity = 0;
+    const dataPoints: FundingVelocity["dataPoints"] = [];
     let peakVelocity = { value: 0, timestamp: 0 };
 
     for (let i = pointCount - 1; i >= 0; i--) {
       const timestamp = now - i * periodMs;
-      const amount = Math.floor(Math.random() * 1000) + 200;
+      const inPeriod = pledges.filter((p) => {
+        const at = p.createdAt * 1000;
+        return at > timestamp - periodMs && at <= timestamp;
+      });
+      const amount = sumEscrowed(inPeriod);
       cumulative += amount;
-      const velocity = amount / (periodMs / (60 * 60 * 1000)); // Per hour
-
-      totalVelocity += velocity;
+      const velocity = Number(formatEther(amount)) / hoursPerPeriod;
 
       if (velocity > peakVelocity.value) {
         peakVelocity = { value: velocity, timestamp };
@@ -784,16 +1080,15 @@ export class AdvancedCampaignService {
 
       dataPoints.push({
         timestamp,
-        amount: String(amount),
-        cumulative: String(cumulative),
-        backers: Math.floor(Math.random() * 10) + 1,
+        amount: amount.toString(),
+        cumulative: cumulative.toString(),
+        backers: distinctBackers(inPeriod),
         velocity,
       });
     }
 
-    const averageVelocity = totalVelocity / pointCount;
-    const recentVelocity =
-      dataPoints.slice(-3).reduce((sum, d) => sum + d.velocity, 0) / 3;
+    const averageVelocity = dataPoints.reduce((sum, d) => sum + d.velocity, 0) / pointCount;
+    const recentVelocity = dataPoints.slice(-3).reduce((sum, d) => sum + d.velocity, 0) / 3;
 
     let trend: FundingVelocity["trend"];
     if (recentVelocity > averageVelocity * 1.1) {
@@ -813,6 +1108,10 @@ export class AdvancedCampaignService {
       trend,
     };
   }
+}
+
+function scheduleKey(campaignId: string, milestoneId: string): string {
+  return `${campaignId}:${milestoneId}`;
 }
 
 // ============================================================================

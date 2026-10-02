@@ -14,6 +14,7 @@ export type NotificationEventType =
   | "campaign_deadline_reached"
   | "campaign_resolved"
   | "campaign_cancelled"
+  | "campaign_reminder"
   // Pledge events
   | "pledge_created"
   | "pledge_escrowed"
@@ -176,6 +177,15 @@ export interface NotificationEvent {
   // Actor
   actorAddress?: string;
   actorType?: "backer" | "creator" | "beneficiary" | "oracle" | "system";
+
+  /** Addressed to these users only, instead of the actor and subscribers */
+  recipients?: string[];
+
+  /**
+   * Only webhooks created by these addresses may receive the event (e.g. the
+   * creator of a non-public campaign); anyone subscribed when unset
+   */
+  audience?: string[];
 
   // Payload
   data: Record<string, any>;

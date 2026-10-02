@@ -8,6 +8,7 @@ import dns from "dns";
 import { AddressInfo } from "net";
 import { isPublicAddress, postToUserUrl, webhookUrlProblem } from "../src/security/outbound";
 import { NotificationService } from "../src/notifications/notification-service";
+import { ApiOracleProvider, OracleConfig } from "../src/oracle";
 
 describe("isPublicAddress", () => {
   it.each([
@@ -142,5 +143,56 @@ describe("webhook subscriptions", () => {
 
     const webhook = service.createWebhook({ ...request, url: "https://hooks.example.com/x" }, "0xabc");
     expect(() => service.updateWebhook(webhook.id, { url: "http://10.0.0.5/" })).toThrow("Invalid webhook URL");
+  });
+});
+
+describe("API oracle endpoints", () => {
+  let server: http.Server;
+  let endpoint: string;
+
+  beforeAll(async () => {
+    server = http.createServer((_req, res) => {
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify({ finished: true, time: 3600 }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}/results`;
+  });
+
+  afterAll(() => {
+    server.close();
+  });
+
+  afterEach(() => {
+    delete process.env.ALLOW_PRIVATE_WEBHOOK_TARGETS;
+  });
+
+  const provider = () =>
+    new ApiOracleProvider({
+      id: "oracle_test",
+      name: "Test",
+      description: "",
+      type: "api",
+      endpoint,
+      method: "GET",
+      responseMapping: { completed: "finished", value: "time" },
+      timeout: 2000,
+      retries: 0,
+      trustLevel: "custom",
+      active: true,
+    } as OracleConfig);
+
+  it("cannot reach internal addresses, even when configured by an admin", async () => {
+    const result = await provider().query({ bib: "42" });
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/private or reserved/);
+    expect(await provider().healthCheck()).toBe(false);
+  });
+
+  it("queries public endpoints", async () => {
+    process.env.ALLOW_PRIVATE_WEBHOOK_TARGETS = "true"; // the test server is local
+    const result = await provider().query({ bib: "42" });
+    expect(result.success).toBe(true);
+    expect(result.data).toMatchObject({ completed: true, value: 3600 });
   });
 });
