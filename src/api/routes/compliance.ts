@@ -5,10 +5,45 @@
  */
 
 import { Router, Request, Response } from "express";
-import { GdprService, createGdprService } from "../../compliance";
-import { authMiddleware } from "../../security/middleware";
+import { createGdprService } from "../../compliance";
+import {
+  authMiddleware,
+  isSelfOrAdmin,
+  requireRole,
+  requireSelfOrAdmin,
+} from "../../security/middleware";
 
 const router = Router();
+
+/**
+ * The subject of a new request: the caller, or (admins only) another user.
+ * Sends a 403 and returns null if the caller may not act for that user.
+ */
+function subjectOf(req: Request, res: Response): string | null {
+  const userAddress: string = req.body?.userAddress ?? req.auth!.address;
+  if (!isSelfOrAdmin(req, userAddress)) {
+    res.status(403).json({ error: "You can only submit requests for your own data" });
+    return null;
+  }
+  return userAddress;
+}
+
+/**
+ * A request record the caller owns (or any, for admins). Others get a 404 so
+ * request IDs cannot be probed.
+ */
+function owned<T extends { userAddress: string }>(
+  req: Request,
+  res: Response,
+  record: T | undefined | null,
+  label: string
+): T | null {
+  if (!record || !isSelfOrAdmin(req, record.userAddress)) {
+    res.status(404).json({ error: `${label} not found` });
+    return null;
+  }
+  return record;
+}
 
 // Initialize GDPR service
 export const gdprService = createGdprService();
@@ -23,11 +58,9 @@ export const gdprService = createGdprService();
  */
 router.post("/export", authMiddleware(), async (req: Request, res: Response) => {
   try {
-    const { userAddress, format, categories } = req.body;
-
-    if (!userAddress) {
-      return res.status(400).json({ error: "userAddress is required" });
-    }
+    const { format, categories } = req.body;
+    const userAddress = subjectOf(req, res);
+    if (!userAddress) return;
 
     const request = await gdprService.requestExport(userAddress, {
       format: format || "json",
@@ -51,13 +84,10 @@ router.post("/export", authMiddleware(), async (req: Request, res: Response) => 
  * Get export request status
  * GET /v1/compliance/export/:requestId
  */
-router.get("/export/:requestId", async (req: Request, res: Response) => {
+router.get("/export/:requestId", authMiddleware(), async (req: Request, res: Response) => {
   try {
-    const request = gdprService.getExportRequest(req.params.requestId);
-
-    if (!request) {
-      return res.status(404).json({ error: "Export request not found" });
-    }
+    const request = owned(req, res, gdprService.getExportRequest(req.params.requestId), "Export request");
+    if (!request) return;
 
     res.json(request);
   } catch (error) {
@@ -71,7 +101,7 @@ router.get("/export/:requestId", async (req: Request, res: Response) => {
  * Get user's export history
  * GET /v1/compliance/export/user/:address
  */
-router.get("/export/user/:address", async (req: Request, res: Response) => {
+router.get("/export/user/:address", authMiddleware(), requireSelfOrAdmin(), async (req: Request, res: Response) => {
   try {
     const exports = gdprService.getExportsByUser(req.params.address);
     res.json(exports);
@@ -92,11 +122,9 @@ router.get("/export/user/:address", async (req: Request, res: Response) => {
  */
 router.post("/delete", authMiddleware(), async (req: Request, res: Response) => {
   try {
-    const { userAddress, type, categories, reason } = req.body;
-
-    if (!userAddress) {
-      return res.status(400).json({ error: "userAddress is required" });
-    }
+    const { type, categories, reason } = req.body;
+    const userAddress = subjectOf(req, res);
+    if (!userAddress) return;
 
     const request = await gdprService.requestDeletion(userAddress, {
       type: type || "anonymize",
@@ -132,6 +160,10 @@ router.post("/delete/:requestId/confirm", authMiddleware(), async (req: Request,
       return res.status(400).json({ error: "confirmationToken is required" });
     }
 
+    if (!owned(req, res, gdprService.getDeletionRequest(req.params.requestId), "Deletion request")) {
+      return;
+    }
+
     const request = await gdprService.confirmDeletion(
       req.params.requestId,
       confirmationToken
@@ -155,6 +187,9 @@ router.post("/delete/:requestId/confirm", authMiddleware(), async (req: Request,
  */
 router.post("/delete/:requestId/cancel", authMiddleware(), async (req: Request, res: Response) => {
   try {
+    if (!owned(req, res, gdprService.getDeletionRequest(req.params.requestId), "Deletion request")) {
+      return;
+    }
     const request = await gdprService.cancelDeletion(req.params.requestId);
     res.json({
       requestId: request.id,
@@ -172,15 +207,16 @@ router.post("/delete/:requestId/cancel", authMiddleware(), async (req: Request, 
  * Get deletion request status
  * GET /v1/compliance/delete/:requestId
  */
-router.get("/delete/:requestId", async (req: Request, res: Response) => {
+router.get("/delete/:requestId", authMiddleware(), async (req: Request, res: Response) => {
   try {
-    const request = gdprService.getDeletionRequest(req.params.requestId);
+    const request = owned(req, res, gdprService.getDeletionRequest(req.params.requestId), "Deletion request");
+    if (!request) return;
 
-    if (!request) {
-      return res.status(404).json({ error: "Deletion request not found" });
-    }
-
-    res.json(request);
+    // The token is only returned when the request is made, so that reading a
+    // request cannot be used to confirm it
+    const visible: Partial<typeof request> = { ...request };
+    delete visible.confirmationToken;
+    res.json(visible);
   } catch (error) {
     res.status(500).json({
       error: error instanceof Error ? error.message : "Failed to get deletion status",
@@ -196,7 +232,7 @@ router.get("/delete/:requestId", async (req: Request, res: Response) => {
  * Get user consent preferences
  * GET /v1/compliance/consent/:address
  */
-router.get("/consent/:address", async (req: Request, res: Response) => {
+router.get("/consent/:address", authMiddleware(), requireSelfOrAdmin(), async (req: Request, res: Response) => {
   try {
     const preferences = gdprService.getConsentPreferences(req.params.address);
     res.json(preferences);
@@ -211,7 +247,7 @@ router.get("/consent/:address", async (req: Request, res: Response) => {
  * Update consent preferences
  * PUT /v1/compliance/consent/:address
  */
-router.put("/consent/:address", authMiddleware(), async (req: Request, res: Response) => {
+router.put("/consent/:address", authMiddleware(), requireSelfOrAdmin(), async (req: Request, res: Response) => {
   try {
     const { consents } = req.body;
 
@@ -238,7 +274,7 @@ router.put("/consent/:address", authMiddleware(), async (req: Request, res: Resp
  * Get consent history
  * GET /v1/compliance/consent/:address/history
  */
-router.get("/consent/:address/history", async (req: Request, res: Response) => {
+router.get("/consent/:address/history", authMiddleware(), requireSelfOrAdmin(), async (req: Request, res: Response) => {
   try {
     const history = gdprService.getConsentHistory(req.params.address);
     res.json(history);
@@ -259,11 +295,13 @@ router.get("/consent/:address/history", async (req: Request, res: Response) => {
  */
 router.post("/gdpr", authMiddleware(), async (req: Request, res: Response) => {
   try {
-    const { userAddress, right } = req.body;
+    const { right } = req.body;
+    const userAddress = subjectOf(req, res);
+    if (!userAddress) return;
 
-    if (!userAddress || !right) {
+    if (!right) {
       return res.status(400).json({
-        error: "userAddress and right are required",
+        error: "right is required",
       });
     }
 
@@ -300,13 +338,10 @@ router.post("/gdpr", authMiddleware(), async (req: Request, res: Response) => {
  * Get GDPR request status
  * GET /v1/compliance/gdpr/:requestId
  */
-router.get("/gdpr/:requestId", async (req: Request, res: Response) => {
+router.get("/gdpr/:requestId", authMiddleware(), async (req: Request, res: Response) => {
   try {
-    const request = gdprService.getGdprRequest(req.params.requestId);
-
-    if (!request) {
-      return res.status(404).json({ error: "GDPR request not found" });
-    }
+    const request = owned(req, res, gdprService.getGdprRequest(req.params.requestId), "GDPR request");
+    if (!request) return;
 
     res.json(request);
   } catch (error) {
@@ -326,11 +361,13 @@ router.get("/gdpr/:requestId", async (req: Request, res: Response) => {
  */
 router.post("/ccpa", authMiddleware(), async (req: Request, res: Response) => {
   try {
-    const { userAddress, right, verificationMethod } = req.body;
+    const { right, verificationMethod } = req.body;
+    const userAddress = subjectOf(req, res);
+    if (!userAddress) return;
 
-    if (!userAddress || !right || !verificationMethod) {
+    if (!right || !verificationMethod) {
       return res.status(400).json({
-        error: "userAddress, right, and verificationMethod are required",
+        error: "right and verificationMethod are required",
       });
     }
 
@@ -401,7 +438,7 @@ router.get("/retention", async (req: Request, res: Response) => {
  * Generate compliance report
  * POST /v1/compliance/reports
  */
-router.post("/reports", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/reports", authMiddleware(), requireRole("admin"), async (req: Request, res: Response) => {
   try {
     const { type, periodStart, periodEnd } = req.body;
 
@@ -433,7 +470,7 @@ router.post("/reports", authMiddleware(), async (req: Request, res: Response) =>
  * Get compliance statistics
  * GET /v1/compliance/stats
  */
-router.get("/stats", async (req: Request, res: Response) => {
+router.get("/stats", authMiddleware(), requireRole("admin"), async (req: Request, res: Response) => {
   try {
     const stats = gdprService.getStats();
     res.json(stats);

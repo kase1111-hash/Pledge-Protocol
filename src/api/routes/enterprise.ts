@@ -4,12 +4,38 @@
  * Organization management, teams, SSO, and bulk operations.
  */
 
-import { Router, Request, Response } from "express";
-import { OrganizationService, createOrganizationService } from "../../enterprise";
-import { authMiddleware } from "../../security/middleware";
+import { Router, Request, Response, NextFunction } from "express";
+import { createOrganizationService } from "../../enterprise";
+import { TeamPermission } from "../../enterprise/types";
+import { authMiddleware, hasRole, requireSelfOrAdmin } from "../../security/middleware";
 
 const router = Router();
 
+// Organization data is private to its members
+router.use(authMiddleware());
+
+/**
+ * Requires the caller to hold `permission` in the route's organization (or to
+ * be a platform admin). Non-members get a 404 so organizations cannot be
+ * probed.
+ */
+function orgPermission(permission: TeamPermission) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const orgId = req.params.orgId;
+    if (hasRole(req, "admin") || orgService.hasPermission(orgId, req.auth!.address, permission)) {
+      return next();
+    }
+    if (orgService.getMember(orgId, req.auth!.address)?.status === "active") {
+      return res.status(403).json({ error: `Requires the ${permission} permission` });
+    }
+    res.status(404).json({ error: "Organization not found" });
+  };
+}
+
+/** Members can be given any role except owner, which is never transferable here */
+function assignableRole(role: unknown): boolean {
+  return typeof role === "string" && role !== "owner";
+}
 // Initialize organization service
 export const orgService = createOrganizationService();
 
@@ -21,24 +47,24 @@ export const orgService = createOrganizationService();
  * Create organization
  * POST /v1/enterprise/orgs
  */
-router.post("/orgs", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/orgs", async (req: Request, res: Response) => {
   try {
     const {
       name,
       type,
-      ownerAddress,
       contactEmail,
       contactName,
       description,
       website,
     } = req.body;
+    // The creator owns the organization
+    const ownerAddress = req.auth!.address;
 
-    if (!name || !type || !ownerAddress || !contactEmail) {
+    if (!name || !type || !contactEmail) {
       return res.status(400).json({
-        error: "Missing required fields: name, type, ownerAddress, contactEmail",
+        error: "Missing required fields: name, type, contactEmail",
       });
     }
-
     const org = orgService.createOrganization({
       name,
       type,
@@ -61,7 +87,7 @@ router.post("/orgs", authMiddleware(), async (req: Request, res: Response) => {
  * Get organization by ID
  * GET /v1/enterprise/orgs/:orgId
  */
-router.get("/orgs/:orgId", async (req: Request, res: Response) => {
+router.get("/orgs/:orgId", orgPermission("campaigns:view"), async (req: Request, res: Response) => {
   try {
     const org = orgService.getOrganization(req.params.orgId);
     if (!org) {
@@ -82,7 +108,8 @@ router.get("/orgs/:orgId", async (req: Request, res: Response) => {
 router.get("/orgs/slug/:slug", async (req: Request, res: Response) => {
   try {
     const org = orgService.getOrganizationBySlug(req.params.slug);
-    if (!org) {
+    const member = org ? orgService.getMember(org.id, req.auth!.address) : undefined;
+    if (!org || (member?.status !== "active" && !hasRole(req, "admin"))) {
       return res.status(404).json({ error: "Organization not found" });
     }
     res.json(org);
@@ -97,7 +124,7 @@ router.get("/orgs/slug/:slug", async (req: Request, res: Response) => {
  * Get user's organizations
  * GET /v1/enterprise/orgs/user/:address
  */
-router.get("/orgs/user/:address", async (req: Request, res: Response) => {
+router.get("/orgs/user/:address", requireSelfOrAdmin(), async (req: Request, res: Response) => {
   try {
     const orgs = orgService.getUserOrganizations(req.params.address);
     res.json(orgs);
@@ -112,13 +139,9 @@ router.get("/orgs/user/:address", async (req: Request, res: Response) => {
  * Update organization
  * PUT /v1/enterprise/orgs/:orgId
  */
-router.put("/orgs/:orgId", authMiddleware(), async (req: Request, res: Response) => {
+router.put("/orgs/:orgId", orgPermission("org:manage"), async (req: Request, res: Response) => {
   try {
-    const actorAddress = req.body.actorAddress || req.headers["x-user-address"];
-    if (!actorAddress) {
-      return res.status(400).json({ error: "actorAddress is required" });
-    }
-
+    const actorAddress = req.auth!.address;
     const org = orgService.updateOrganization(
       req.params.orgId,
       req.body,
@@ -137,13 +160,9 @@ router.put("/orgs/:orgId", authMiddleware(), async (req: Request, res: Response)
  * Update organization settings
  * PUT /v1/enterprise/orgs/:orgId/settings
  */
-router.put("/orgs/:orgId/settings", authMiddleware(), async (req: Request, res: Response) => {
+router.put("/orgs/:orgId/settings", orgPermission("org:manage"), async (req: Request, res: Response) => {
   try {
-    const actorAddress = req.body.actorAddress || req.headers["x-user-address"];
-    if (!actorAddress) {
-      return res.status(400).json({ error: "actorAddress is required" });
-    }
-
+    const actorAddress = req.auth!.address;
     const org = orgService.updateOrganizationSettings(
       req.params.orgId,
       req.body.settings,
@@ -166,7 +185,7 @@ router.put("/orgs/:orgId/settings", authMiddleware(), async (req: Request, res: 
  * Get organization members
  * GET /v1/enterprise/orgs/:orgId/members
  */
-router.get("/orgs/:orgId/members", async (req: Request, res: Response) => {
+router.get("/orgs/:orgId/members", orgPermission("campaigns:view"), async (req: Request, res: Response) => {
   try {
     const members = orgService.getMembers(req.params.orgId);
     res.json(members);
@@ -181,16 +200,19 @@ router.get("/orgs/:orgId/members", async (req: Request, res: Response) => {
  * Add team member
  * POST /v1/enterprise/orgs/:orgId/members
  */
-router.post("/orgs/:orgId/members", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/members", orgPermission("org:members"), async (req: Request, res: Response) => {
   try {
-    const { userAddress, role, displayName, email, invitedBy } = req.body;
+    const { userAddress, role, displayName, email } = req.body;
+    const invitedBy = req.auth!.address;
 
     if (!userAddress || !role) {
       return res.status(400).json({
         error: "userAddress and role are required",
       });
     }
-
+    if (!assignableRole(role)) {
+      return res.status(400).json({ error: "The owner role cannot be assigned" });
+    }
     const member = orgService.addMember(req.params.orgId, {
       userAddress,
       role,
@@ -213,17 +235,20 @@ router.post("/orgs/:orgId/members", authMiddleware(), async (req: Request, res: 
  */
 router.put(
   "/orgs/:orgId/members/:address/role",
-  authMiddleware(),
+  orgPermission("org:members"),
   async (req: Request, res: Response) => {
     try {
-      const { role, actorAddress } = req.body;
+      const { role } = req.body;
+      const actorAddress = req.auth!.address;
 
-      if (!role || !actorAddress) {
+      if (!role) {
         return res.status(400).json({
-          error: "role and actorAddress are required",
+          error: "role is required",
         });
       }
-
+      if (!assignableRole(role)) {
+        return res.status(400).json({ error: "The owner role cannot be assigned" });
+      }
       const member = orgService.updateMemberRole(
         req.params.orgId,
         req.params.address,
@@ -246,17 +271,10 @@ router.put(
  */
 router.delete(
   "/orgs/:orgId/members/:address",
-  authMiddleware(),
+  orgPermission("org:members"),
   async (req: Request, res: Response) => {
     try {
-      const actorAddress =
-        (req.query.actorAddress as string) ||
-        req.headers["x-user-address"];
-
-      if (!actorAddress) {
-        return res.status(400).json({ error: "actorAddress is required" });
-      }
-
+      const actorAddress = req.auth!.address;
       orgService.removeMember(
         req.params.orgId,
         req.params.address,
@@ -280,16 +298,19 @@ router.delete(
  * Create team invite
  * POST /v1/enterprise/orgs/:orgId/invites
  */
-router.post("/orgs/:orgId/invites", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/invites", orgPermission("org:members"), async (req: Request, res: Response) => {
   try {
-    const { email, role, invitedBy } = req.body;
+    const { email, role } = req.body;
+    const invitedBy = req.auth!.address;
 
-    if (!email || !role || !invitedBy) {
+    if (!email || !role) {
       return res.status(400).json({
-        error: "email, role, and invitedBy are required",
+        error: "email and role are required",
       });
     }
-
+    if (!assignableRole(role)) {
+      return res.status(400).json({ error: "The owner role cannot be assigned" });
+    }
     const invite = orgService.createInvite(req.params.orgId, {
       email,
       role,
@@ -308,14 +329,10 @@ router.post("/orgs/:orgId/invites", authMiddleware(), async (req: Request, res: 
  * Accept invite
  * POST /v1/enterprise/invites/:token/accept
  */
-router.post("/invites/:token/accept", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/invites/:token/accept", async (req: Request, res: Response) => {
   try {
-    const { userAddress } = req.body;
-
-    if (!userAddress) {
-      return res.status(400).json({ error: "userAddress is required" });
-    }
-
+    // The invite is accepted by, and for, the signed-in account
+    const userAddress = req.auth!.address;
     const member = orgService.acceptInvite(req.params.token, userAddress);
     res.json(member);
   } catch (error) {
@@ -329,7 +346,7 @@ router.post("/invites/:token/accept", authMiddleware(), async (req: Request, res
  * Get pending invites
  * GET /v1/enterprise/orgs/:orgId/invites
  */
-router.get("/orgs/:orgId/invites", async (req: Request, res: Response) => {
+router.get("/orgs/:orgId/invites", orgPermission("org:members"), async (req: Request, res: Response) => {
   try {
     const invites = orgService.getPendingInvites(req.params.orgId);
     res.json(invites);
@@ -348,7 +365,7 @@ router.get("/orgs/:orgId/invites", async (req: Request, res: Response) => {
  * Configure SSO
  * POST /v1/enterprise/orgs/:orgId/sso
  */
-router.post("/orgs/:orgId/sso", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/sso", orgPermission("org:manage"), async (req: Request, res: Response) => {
   try {
     const config = orgService.configureSso(req.params.orgId, req.body);
     res.status(201).json(config);
@@ -363,7 +380,7 @@ router.post("/orgs/:orgId/sso", authMiddleware(), async (req: Request, res: Resp
  * Get SSO configuration
  * GET /v1/enterprise/orgs/:orgId/sso
  */
-router.get("/orgs/:orgId/sso", async (req: Request, res: Response) => {
+router.get("/orgs/:orgId/sso", orgPermission("org:manage"), async (req: Request, res: Response) => {
   try {
     const config = orgService.getSsoConfig(req.params.orgId);
     if (!config) {
@@ -381,7 +398,7 @@ router.get("/orgs/:orgId/sso", async (req: Request, res: Response) => {
  * Validate SSO session
  * POST /v1/enterprise/orgs/:orgId/sso/validate
  */
-router.post("/orgs/:orgId/sso/validate", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/sso/validate", orgPermission("org:manage"), async (req: Request, res: Response) => {
   try {
     const { externalUserId, email } = req.body;
 
@@ -413,7 +430,7 @@ router.post("/orgs/:orgId/sso/validate", authMiddleware(), async (req: Request, 
  * Get billing info
  * GET /v1/enterprise/orgs/:orgId/billing
  */
-router.get("/orgs/:orgId/billing", async (req: Request, res: Response) => {
+router.get("/orgs/:orgId/billing", orgPermission("org:billing"), async (req: Request, res: Response) => {
   try {
     const billing = orgService.getBilling(req.params.orgId);
     if (!billing) {
@@ -431,16 +448,16 @@ router.get("/orgs/:orgId/billing", async (req: Request, res: Response) => {
  * Upgrade plan
  * POST /v1/enterprise/orgs/:orgId/billing/upgrade
  */
-router.post("/orgs/:orgId/billing/upgrade", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/billing/upgrade", orgPermission("org:billing"), async (req: Request, res: Response) => {
   try {
-    const { plan, cycle, actorAddress } = req.body;
+    const { plan, cycle } = req.body;
+    const actorAddress = req.auth!.address;
 
-    if (!plan || !cycle || !actorAddress) {
+    if (!plan || !cycle) {
       return res.status(400).json({
-        error: "plan, cycle, and actorAddress are required",
+        error: "plan and cycle are required",
       });
     }
-
     const billing = orgService.upgradePlan(
       req.params.orgId,
       plan,
@@ -464,16 +481,16 @@ router.post("/orgs/:orgId/billing/upgrade", authMiddleware(), async (req: Reques
  * Create bulk operation
  * POST /v1/enterprise/orgs/:orgId/bulk
  */
-router.post("/orgs/:orgId/bulk", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/bulk", orgPermission("campaigns:manage"), async (req: Request, res: Response) => {
   try {
-    const { type, inputData, createdBy } = req.body;
+    const { type, inputData } = req.body;
+    const createdBy = req.auth!.address;
 
-    if (!type || !inputData || !createdBy) {
+    if (!type || !inputData) {
       return res.status(400).json({
-        error: "type, inputData, and createdBy are required",
+        error: "type and inputData are required",
       });
     }
-
     const operation = orgService.createBulkOperation(req.params.orgId, {
       type,
       inputData,
@@ -494,10 +511,13 @@ router.post("/orgs/:orgId/bulk", authMiddleware(), async (req: Request, res: Res
  */
 router.get(
   "/orgs/:orgId/bulk/:operationId",
+  orgPermission("campaigns:view"),
   async (req: Request, res: Response) => {
     try {
       const operation = orgService.getBulkOperation(req.params.operationId);
-      if (!operation) {
+
+      // Operations are looked up by ID alone; only show this org's
+      if (!operation || operation.organizationId !== req.params.orgId) {
         return res.status(404).json({ error: "Operation not found" });
       }
       res.json(operation);
@@ -513,7 +533,7 @@ router.get(
  * List organization bulk operations
  * GET /v1/enterprise/orgs/:orgId/bulk
  */
-router.get("/orgs/:orgId/bulk", async (req: Request, res: Response) => {
+router.get("/orgs/:orgId/bulk", orgPermission("campaigns:view"), async (req: Request, res: Response) => {
   try {
     const operations = orgService.getOrgBulkOperations(req.params.orgId);
     res.json(operations);
@@ -532,16 +552,16 @@ router.get("/orgs/:orgId/bulk", async (req: Request, res: Response) => {
  * Create API key
  * POST /v1/enterprise/orgs/:orgId/api-keys
  */
-router.post("/orgs/:orgId/api-keys", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/orgs/:orgId/api-keys", orgPermission("api:manage"), async (req: Request, res: Response) => {
   try {
-    const { name, permissions, createdBy, expiresAt } = req.body;
+    const { name, permissions, expiresAt } = req.body;
+    const createdBy = req.auth!.address;
 
-    if (!name || !permissions || !createdBy) {
+    if (!name || !permissions) {
       return res.status(400).json({
-        error: "name, permissions, and createdBy are required",
+        error: "name and permissions are required",
       });
     }
-
     const result = orgService.createApiKey(req.params.orgId, {
       name,
       permissions,
@@ -565,7 +585,7 @@ router.post("/orgs/:orgId/api-keys", authMiddleware(), async (req: Request, res:
  * List API keys
  * GET /v1/enterprise/orgs/:orgId/api-keys
  */
-router.get("/orgs/:orgId/api-keys", async (req: Request, res: Response) => {
+router.get("/orgs/:orgId/api-keys", orgPermission("api:manage"), async (req: Request, res: Response) => {
   try {
     const keys = orgService.getApiKeys(req.params.orgId);
     // Don't expose key hashes
@@ -592,16 +612,10 @@ router.get("/orgs/:orgId/api-keys", async (req: Request, res: Response) => {
  */
 router.post(
   "/orgs/:orgId/api-keys/:keyId/revoke",
-  authMiddleware(),
+  orgPermission("api:manage"),
   async (req: Request, res: Response) => {
     try {
-      const actorAddress =
-        req.body.actorAddress || req.headers["x-user-address"];
-
-      if (!actorAddress) {
-        return res.status(400).json({ error: "actorAddress is required" });
-      }
-
+      const actorAddress = req.auth!.address;
       const key = orgService.revokeApiKey(
         req.params.orgId,
         req.params.keyId,
@@ -625,7 +639,7 @@ router.post(
  * Get organization audit logs
  * GET /v1/enterprise/orgs/:orgId/audit
  */
-router.get("/orgs/:orgId/audit", async (req: Request, res: Response) => {
+router.get("/orgs/:orgId/audit", orgPermission("org:manage"), async (req: Request, res: Response) => {
   try {
     const { limit, offset, action, resource } = req.query;
 

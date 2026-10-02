@@ -6,7 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { translationService } from "../../i18n";
-import { authMiddleware, requireRole, sameAddress } from "../../security/middleware";
+import { authMiddleware, requireRole, requireSelfOrAdmin, sameAddress } from "../../security/middleware";
 
 const router = Router();
 
@@ -313,7 +313,7 @@ router.post("/currencies/convert", (req: Request, res: Response) => {
  * GET /i18n/preferences/:address
  * Get user locale preferences
  */
-router.get("/preferences/:address", (req: Request, res: Response) => {
+router.get("/preferences/:address", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   const preferences = translationService.getUserPreferences(req.params.address);
   res.json(preferences);
 });

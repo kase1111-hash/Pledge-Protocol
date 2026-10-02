@@ -6,7 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { FraudDetector, createFraudDetector } from "../../risk";
-import { authMiddleware } from "../../security/middleware";
+import { authMiddleware, isSelfOrAdmin, requireRole, requireSelfOrAdmin } from "../../security/middleware";
 
 const router = Router();
 
@@ -25,6 +25,9 @@ router.post("/verify", authMiddleware(), async (req: Request, res: Response) => 
   try {
     const { userAddress, type, level } = req.body;
 
+    if (userAddress && !isSelfOrAdmin(req, userAddress)) {
+      return res.status(403).json({ error: "You can only start verification for yourself" });
+    }
     if (!userAddress || !type) {
       return res.status(400).json({
         error: "userAddress and type are required",
@@ -63,7 +66,7 @@ router.post("/verify", authMiddleware(), async (req: Request, res: Response) => 
  * Complete verification
  * POST /v1/risk/verify/:verificationId/complete
  */
-router.post("/verify/:verificationId/complete", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/verify/:verificationId/complete", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { success, verifiedData, rejectionReason, provider, expiresInDays } =
       req.body;
@@ -95,7 +98,7 @@ router.post("/verify/:verificationId/complete", authMiddleware(), async (req: Re
  * Get verification summary
  * GET /v1/risk/verify/:address
  */
-router.get("/verify/:address", async (req: Request, res: Response) => {
+router.get("/verify/:address", authMiddleware(), requireSelfOrAdmin(), async (req: Request, res: Response) => {
   try {
     const summary = fraudDetector.getVerificationSummary(req.params.address);
     res.json(summary);
@@ -129,7 +132,7 @@ router.get("/badges/:address", async (req: Request, res: Response) => {
  * Award badge
  * POST /v1/risk/badges
  */
-router.post("/badges", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/badges", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { userAddress, type } = req.body;
 
@@ -156,7 +159,7 @@ router.post("/badges", authMiddleware(), async (req: Request, res: Response) => 
  * Calculate trust score
  * POST /v1/risk/score/:address
  */
-router.post("/score/:address", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/score/:address", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const stats = req.body;
 
@@ -201,7 +204,7 @@ router.get("/score/:address", async (req: Request, res: Response) => {
  * Assess risk
  * POST /v1/risk/assess
  */
-router.post("/assess", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/assess", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { entityType, entityId, data } = req.body;
 
@@ -232,7 +235,7 @@ router.post("/assess", authMiddleware(), async (req: Request, res: Response) => 
  * Get risk assessment
  * GET /v1/risk/assess/:assessmentId
  */
-router.get("/assess/:assessmentId", async (req: Request, res: Response) => {
+router.get("/assess/:assessmentId", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const assessment = fraudDetector.getAssessment(req.params.assessmentId);
 
@@ -256,7 +259,7 @@ router.get("/assess/:assessmentId", async (req: Request, res: Response) => {
  * Get open alerts
  * GET /v1/risk/alerts
  */
-router.get("/alerts", async (req: Request, res: Response) => {
+router.get("/alerts", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const alerts = fraudDetector.getOpenAlerts();
     res.json(alerts);
@@ -271,7 +274,7 @@ router.get("/alerts", async (req: Request, res: Response) => {
  * Acknowledge alert
  * POST /v1/risk/alerts/:alertId/acknowledge
  */
-router.post("/alerts/:alertId/acknowledge", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/alerts/:alertId/acknowledge", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { acknowledgedBy } = req.body;
 
@@ -296,7 +299,7 @@ router.post("/alerts/:alertId/acknowledge", authMiddleware(), async (req: Reques
  * Resolve alert
  * POST /v1/risk/alerts/:alertId/resolve
  */
-router.post("/alerts/:alertId/resolve", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/alerts/:alertId/resolve", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { resolvedBy, resolution, actionTaken } = req.body;
 
@@ -329,7 +332,7 @@ router.post("/alerts/:alertId/resolve", authMiddleware(), async (req: Request, r
  * Add to blocklist
  * POST /v1/risk/blocklist
  */
-router.post("/blocklist", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/blocklist", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { type, value, reason, severity, addedBy } = req.body;
 
@@ -366,7 +369,7 @@ router.post("/blocklist", authMiddleware(), async (req: Request, res: Response) 
  * Check if blocked
  * GET /v1/risk/blocklist/check
  */
-router.get("/blocklist/check", async (req: Request, res: Response) => {
+router.get("/blocklist/check", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { type, value } = req.query;
 
@@ -393,7 +396,7 @@ router.get("/blocklist/check", async (req: Request, res: Response) => {
  * Remove from blocklist
  * DELETE /v1/risk/blocklist
  */
-router.delete("/blocklist", authMiddleware(), async (req: Request, res: Response) => {
+router.delete("/blocklist", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { type, value } = req.body;
 
@@ -420,7 +423,7 @@ router.delete("/blocklist", authMiddleware(), async (req: Request, res: Response
  * Generate risk report
  * POST /v1/risk/reports
  */
-router.post("/reports", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/reports", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { periodStart, periodEnd } = req.body;
 

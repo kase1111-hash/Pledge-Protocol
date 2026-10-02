@@ -29,6 +29,8 @@ export {
   requirePermission,
   requireRole,
   hasRole,
+  isSelfOrAdmin,
+  requireSelfOrAdmin,
   sameAddress,
   asyncHandler,
   rawBodyOf,

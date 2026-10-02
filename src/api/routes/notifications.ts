@@ -6,7 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { notificationService } from "../../notifications-v2";
-import { authMiddleware } from "../../security/middleware";
+import { authMiddleware, requireRole, requireSelfOrAdmin } from "../../security/middleware";
 
 const router = Router();
 
@@ -18,7 +18,7 @@ const router = Router();
  * POST /notifications/send
  * Send a notification to a user
  */
-router.post("/send", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/send", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { recipientAddress, type, variables, channels, priority, metadata } = req.body;
 
@@ -43,7 +43,7 @@ router.post("/send", authMiddleware(), async (req: Request, res: Response) => {
  * POST /notifications/broadcast
  * Broadcast to a topic
  */
-router.post("/broadcast", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/broadcast", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const { topic, type, variables } = req.body;
 
@@ -69,7 +69,7 @@ router.post("/broadcast", authMiddleware(), async (req: Request, res: Response) 
  * GET /notifications/preferences/:address
  * Get notification preferences
  */
-router.get("/preferences/:address", (req: Request, res: Response) => {
+router.get("/preferences/:address", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   const preferences = notificationService.getPreferences(req.params.address);
   res.json(preferences);
 });
@@ -78,7 +78,7 @@ router.get("/preferences/:address", (req: Request, res: Response) => {
  * PUT /notifications/preferences/:address
  * Update notification preferences
  */
-router.put("/preferences/:address", authMiddleware(), (req: Request, res: Response) => {
+router.put("/preferences/:address", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   try {
     const updated = notificationService.updatePreferences(
       req.params.address,
@@ -100,7 +100,7 @@ router.put("/preferences/:address", authMiddleware(), (req: Request, res: Respon
  * POST /notifications/devices/:address
  * Register a device for push notifications
  */
-router.post("/devices/:address", authMiddleware(), (req: Request, res: Response) => {
+router.post("/devices/:address", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   try {
     const { token, platform, deviceId, deviceName } = req.body;
 
@@ -123,7 +123,7 @@ router.post("/devices/:address", authMiddleware(), (req: Request, res: Response)
  * DELETE /notifications/devices/:address/:deviceId
  * Unregister a device
  */
-router.delete("/devices/:address/:deviceId", authMiddleware(), (req: Request, res: Response) => {
+router.delete("/devices/:address/:deviceId", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   const success = notificationService.unregisterDevice(
     req.params.address,
     req.params.deviceId
@@ -144,7 +144,7 @@ router.delete("/devices/:address/:deviceId", authMiddleware(), (req: Request, re
  * GET /notifications/in-app/:address
  * Get in-app notifications
  */
-router.get("/in-app/:address", (req: Request, res: Response) => {
+router.get("/in-app/:address", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   const { types, read, archived, limit, offset, since } = req.query;
 
   const notifications = notificationService.getInAppNotifications({
@@ -167,7 +167,7 @@ router.get("/in-app/:address", (req: Request, res: Response) => {
  * POST /notifications/in-app/:address/read
  * Mark notifications as read
  */
-router.post("/in-app/:address/read", authMiddleware(), (req: Request, res: Response) => {
+router.post("/in-app/:address/read", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   const { notificationIds } = req.body;
 
   const count = notificationService.markAsRead(
@@ -182,7 +182,7 @@ router.post("/in-app/:address/read", authMiddleware(), (req: Request, res: Respo
  * POST /notifications/in-app/:address/read-all
  * Mark all notifications as read
  */
-router.post("/in-app/:address/read-all", authMiddleware(), (req: Request, res: Response) => {
+router.post("/in-app/:address/read-all", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   const count = notificationService.markAllAsRead(req.params.address);
   res.json({ markedAsRead: count });
 });
@@ -191,7 +191,7 @@ router.post("/in-app/:address/read-all", authMiddleware(), (req: Request, res: R
  * POST /notifications/in-app/:address/archive
  * Archive notifications
  */
-router.post("/in-app/:address/archive", authMiddleware(), (req: Request, res: Response) => {
+router.post("/in-app/:address/archive", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   const { notificationIds } = req.body;
 
   const count = notificationService.archiveNotifications(
@@ -210,7 +210,7 @@ router.post("/in-app/:address/archive", authMiddleware(), (req: Request, res: Re
  * POST /notifications/digest/:address
  * Generate and send digest
  */
-router.post("/digest/:address", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/digest/:address", authMiddleware(), requireSelfOrAdmin(), async (req: Request, res: Response) => {
   try {
     const { period = "weekly" } = req.body;
 
@@ -236,7 +236,7 @@ router.post("/digest/:address", authMiddleware(), async (req: Request, res: Resp
  * GET /notifications/stats
  * Get delivery statistics
  */
-router.get("/stats", (req: Request, res: Response) => {
+router.get("/stats", authMiddleware(), requireRole("admin"), (req: Request, res: Response) => {
   const { startDate, endDate, channel, type } = req.query;
 
   const stats = notificationService.getDeliveryStats({

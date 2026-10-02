@@ -193,6 +193,6 @@ describe.skipIf(!TEST_DATABASE_URL)("state survives a server restart", () => {
     const following = await call("GET", `/v1/social/users/${user.address}/following`);
     expect(JSON.stringify(following.body).toLowerCase()).toContain(friend.address.toLowerCase());
 
-    expect((await call("GET", `/v1/i18n/preferences/${user.address}`)).body.locale).toBe("fr");
+    expect((await call("GET", `/v1/i18n/preferences/${user.address}`, userSession)).body.locale).toBe("fr");
   }, 120_000);
 });

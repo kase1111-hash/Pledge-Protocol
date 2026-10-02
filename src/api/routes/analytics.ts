@@ -7,6 +7,7 @@ import { Router, Request, Response } from "express";
 import { searchService } from "../../discovery";
 import { disputeService } from "../../governance";
 import { notificationService } from "../../notifications";
+import { authMiddleware, requireSelfOrAdmin } from "../../security/middleware";
 
 const router = Router();
 
@@ -18,7 +19,7 @@ const router = Router();
  * GET /analytics/creators/:address/dashboard
  * Get creator dashboard overview
  */
-router.get("/creators/:address/dashboard", (req: Request, res: Response) => {
+router.get("/creators/:address/dashboard", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   try {
     const { address } = req.params;
 
@@ -106,7 +107,7 @@ router.get("/creators/:address/dashboard", (req: Request, res: Response) => {
  * GET /analytics/creators/:address/campaigns
  * Get detailed campaign analytics for creator
  */
-router.get("/creators/:address/campaigns", (req: Request, res: Response) => {
+router.get("/creators/:address/campaigns", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   try {
     const { address } = req.params;
     const campaigns = searchService.getCreatorCampaigns(address);
@@ -161,7 +162,7 @@ router.get("/creators/:address/campaigns", (req: Request, res: Response) => {
  * GET /analytics/creators/:address/performance
  * Get creator performance over time
  */
-router.get("/creators/:address/performance", (req: Request, res: Response) => {
+router.get("/creators/:address/performance", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   try {
     const { address } = req.params;
     const campaigns = searchService.getCreatorCampaigns(address);
@@ -232,7 +233,7 @@ router.get("/creators/:address/performance", (req: Request, res: Response) => {
  * GET /analytics/backers/:address/dashboard
  * Get backer dashboard overview
  */
-router.get("/backers/:address/dashboard", (req: Request, res: Response) => {
+router.get("/backers/:address/dashboard", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   try {
     const { address } = req.params;
 
@@ -280,7 +281,7 @@ router.get("/backers/:address/dashboard", (req: Request, res: Response) => {
  * GET /analytics/backers/:address/portfolio
  * Get backer portfolio analytics
  */
-router.get("/backers/:address/portfolio", (req: Request, res: Response) => {
+router.get("/backers/:address/portfolio", authMiddleware(), requireSelfOrAdmin(), (req: Request, res: Response) => {
   try {
     const { address } = req.params;
 

@@ -587,6 +587,120 @@ for (const backend of storeBackends("api_integration_test")) {
       });
     });
 
+    describe("private data", () => {
+      it("keeps GDPR requests to their subject", async () => {
+        // Requesting deletion of someone else's data is refused
+        expect((await as(sessions.stranger).post("/v1/compliance/delete", { userAddress: backer.address })).status).toBe(403);
+
+        const requested = await as(sessions.backer).post("/v1/compliance/delete", {});
+        expect(requested.status).toBe(202);
+        const id = requested.body.requestId;
+        expect(requested.body.confirmationToken).toBeTruthy();
+
+        expect((await request(app).get(`/v1/compliance/delete/${id}`)).status).toBe(401);
+        expect((await as(sessions.stranger).get(`/v1/compliance/delete/${id}`)).status).toBe(404);
+        expect((await as(sessions.stranger).post(`/v1/compliance/delete/${id}/cancel`)).status).toBe(404);
+
+        // The owner can read it, but not the token that confirms it
+        const own = await as(sessions.backer).get(`/v1/compliance/delete/${id}`);
+        expect(own.status).toBe(200);
+        expect(own.body).not.toHaveProperty("confirmationToken");
+
+        expect((await as(sessions.stranger).get(`/v1/compliance/consent/${backer.address}`)).status).toBe(403);
+        expect((await as(sessions.backer).get(`/v1/compliance/consent/${backer.address}`)).status).toBe(200);
+        expect((await as(sessions.backer).get("/v1/compliance/stats")).status).toBe(403);
+      });
+
+      it("limits organizations to their members and permissions", async () => {
+        const created = await as(sessions.creator).post("/v1/enterprise/orgs", {
+          name: `Org ${Date.now()}`,
+          type: "nonprofit",
+          contactEmail: "org@example.com",
+          ownerAddress: stranger.address, // ignored: the creator owns it
+        });
+        expect(created.status).toBe(201);
+        const orgId = created.body.id;
+        const path = (suffix = "") => `/v1/enterprise/orgs/${orgId}${suffix}`;
+
+        // Outsiders cannot see or change anything
+        expect((await as(sessions.stranger).get(path())).status).toBe(404);
+        expect((await as(sessions.stranger).get(path("/sso"))).status).toBe(404);
+        expect((await as(sessions.stranger).post(path("/members"), { userAddress: stranger.address, role: "admin" })).status).toBe(404);
+        expect((await as(sessions.stranger).put(path(), { name: "Hijacked" })).status).toBe(404);
+
+        // The owner adds a viewer, who can read but not manage
+        expect((await as(sessions.creator).post(path("/members"), { userAddress: backer.address, role: "viewer" })).status).toBe(201);
+        expect((await as(sessions.backer).get(path())).status).toBe(200);
+        expect((await as(sessions.backer).post(path("/api-keys"), { name: "k", permissions: [] })).status).toBe(403);
+        expect((await as(sessions.backer).get(path("/audit"))).status).toBe(403);
+
+        // Ownership cannot be handed out, and protected fields cannot be overwritten
+        expect((await as(sessions.creator).post(path("/members"), { userAddress: stranger.address, role: "owner" })).status).toBe(400);
+        const updated = await as(sessions.creator).put(path(), { name: "Renamed", id: "org_other", status: "suspended" });
+        expect(updated.body).toMatchObject({ id: orgId, name: "Renamed" });
+        expect(updated.body.status).not.toBe("suspended");
+      });
+
+      it("keeps financial reports private and reaches the scheduled list", async () => {
+        expect((await as(sessions.stranger).get(`/v1/reports/financial/${backer.address}`)).status).toBe(403);
+        expect((await as(sessions.backer).get(`/v1/reports/financial/${backer.address}`)).status).toBe(200);
+
+        const report = await as(sessions.backer).post("/v1/reports/generate", { type: "financial_summary", format: "json" });
+        expect(report.status).toBe(202);
+        expect((await as(sessions.stranger).get(`/v1/reports/${report.body.id}`)).status).toBe(404);
+        expect((await as(sessions.backer).get(`/v1/reports/${report.body.id}`)).status).toBe(200);
+
+        // Previously shadowed by GET /:reportId
+        const scheduled = await as(sessions.backer).get("/v1/reports/scheduled");
+        expect(scheduled.status).toBe(200);
+        expect(scheduled.body).toHaveProperty("reports");
+        expect((await as(sessions.backer).get("/v1/reports/disputes")).status).toBe(403);
+      });
+
+      it("keeps integrations to their owner", async () => {
+        const created = await as(sessions.backer).post("/v1/integrations", {
+          type: "zapier",
+          name: "Zap",
+          ownerAddress: stranger.address, // ignored
+          config: { type: "zapier", webhookUrl: "https://hooks.zapier.com/hooks/catch/1/abc" },
+          events: ["pledge_created"],
+        });
+        expect(created.status).toBe(201);
+        expect(created.body.ownerAddress.toLowerCase()).toBe(backer.address.toLowerCase());
+
+        expect((await as(sessions.stranger).get(`/v1/integrations/${created.body.id}`)).status).toBe(404);
+        expect((await as(sessions.stranger).delete(`/v1/integrations/${created.body.id}`)).status).toBe(404);
+        const strangerList = await as(sessions.stranger).get(`/v1/integrations?address=${backer.address}`);
+        expect(strangerList.body.integrations).toEqual([]);
+
+        // Previously shadowed by GET /:integrationId
+        expect((await as(sessions.backer).get("/v1/integrations/stats")).status).toBe(200);
+        expect((await request(app).get("/v1/integrations/available")).status).toBe(200);
+
+        expect((await as(sessions.backer).post("/v1/integrations", {
+          type: "zapier",
+          name: "Internal",
+          config: { type: "zapier", webhookUrl: "http://169.254.169.254/latest" },
+          events: ["pledge_created"],
+        })).status).toBe(400);
+        expect((await as(sessions.backer).get("/v1/integrations/oauth/slack/url?returnUrl=https://evil.example")).status).toBe(400);
+      });
+
+      it("reserves verification decisions, alerts and broadcasts for staff", async () => {
+        expect((await as(sessions.backer).post("/v1/risk/verify/v1/complete", { approved: true })).status).toBe(403);
+        expect((await as(sessions.backer).post("/v1/risk/badges", { userAddress: backer.address, badge: "verified" })).status).toBe(403);
+        expect((await as(sessions.backer).get("/v1/risk/alerts")).status).toBe(403);
+        expect((await as(sessions.stranger).get(`/v1/risk/verify/${backer.address}`)).status).toBe(403);
+
+        expect((await as(sessions.backer).post("/v1/notifications/broadcast", { title: "Win a prize" })).status).toBe(403);
+        expect((await as(sessions.stranger).get(`/v1/notifications/in-app/${backer.address}`)).status).toBe(403);
+        expect((await as(sessions.backer).get(`/v1/notifications/in-app/${backer.address}`)).status).toBe(200);
+
+        expect((await as(sessions.stranger).get(`/v1/analytics/backers/${backer.address}/portfolio`)).status).toBe(403);
+        expect((await as(sessions.stranger).get(`/v1/i18n/preferences/${backer.address}`)).status).toBe(403);
+      });
+    });
+
     describe("oracles", () => {
       it("never exposes oracle config, which can hold credentials", async () => {
         const created = await as(sessions.admin).post("/v1/oracles", {

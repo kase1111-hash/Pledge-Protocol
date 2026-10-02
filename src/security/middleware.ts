@@ -169,6 +169,33 @@ export function hasRole(req: Request, ...roles: UserRole[]): boolean {
 }
 
 /**
+ * Whether the signed-in caller is `address` or an admin
+ */
+export function isSelfOrAdmin(req: Request, address: string | null | undefined): boolean {
+  return sameAddress(address, req.auth?.address) || hasRole(req, "admin");
+}
+
+/**
+ * Requires a session belonging to the address in route parameter `param`, or
+ * an admin. Use after authMiddleware().
+ */
+export function requireSelfOrAdmin(
+  param = "address"
+): (req: Request, res: Response, next: NextFunction) => void {
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (!isSelfOrAdmin(req, req.params[param])) {
+      res.status(403).json({
+        success: false,
+        error: "You can only access your own data",
+        code: "FORBIDDEN",
+      });
+      return;
+    }
+    next();
+  };
+}
+
+/**
  * The exact body bytes a webhook provider signed. Falls back to re-serializing
  * the parsed body when the app was mounted without raw body capture.
  */

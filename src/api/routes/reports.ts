@@ -1,32 +1,56 @@
 /**
- * Phase 10: Reports API Routes
+ * Phase 10: Reporting API Routes
  *
- * Financial reports, tax documents, and exports.
+ * Financial reports, tax documents, exports and scheduled reports. Reports
+ * describe a user's finances, so every route requires a session and returns
+ * only the caller's own data (admins may see anyone's).
  */
 
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import { reportService } from "../../reporting";
-import { authMiddleware } from "../../security/middleware";
+import {
+  asyncHandler,
+  authMiddleware,
+  hasRole,
+  isSelfOrAdmin,
+  requireRole,
+  requireSelfOrAdmin,
+  sameAddress,
+} from "../../security/middleware";
+import { getStore } from "../../database";
 
 const router = Router();
 
+router.use(authMiddleware());
+
+/**
+ * A record the caller owns (or any, for admins). Others get a 404 so IDs
+ * cannot be probed. Sends the response and returns null otherwise.
+ */
+function owned<T>(req: Request, res: Response, record: T | null, owner: (r: T) => string, label: string): T | null {
+  if (!record || !isSelfOrAdmin(req, owner(record))) {
+    res.status(404).json({ error: `${label} not found` });
+    return null;
+  }
+  return record;
+}
+
 // ============================================================================
-// GENERATE REPORTS
+// REPORT GENERATION
 // ============================================================================
 
 /**
  * POST /reports/generate
  * Generate a report
  */
-router.post("/generate", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/generate", async (req: Request, res: Response) => {
   try {
     const { type, format, period, filters, options } = req.body;
-    const requestedBy = req.body.requestedBy || "anonymous";
 
     const report = await reportService.generateReport({
       type,
       format: format || "pdf",
-      requestedBy,
+      requestedBy: req.auth!.address,
       period: {
         type: period?.type || "month",
         startDate: period?.startDate,
@@ -44,60 +68,6 @@ router.post("/generate", authMiddleware(), async (req: Request, res: Response) =
   }
 });
 
-/**
- * GET /reports/:reportId
- * Get report status
- */
-router.get("/:reportId", (req: Request, res: Response) => {
-  const report = reportService.getReportStatus(req.params.reportId);
-
-  if (!report) {
-    return res.status(404).json({ error: "Report not found" });
-  }
-
-  res.json(report);
-});
-
-/**
- * GET /reports/:reportId/download
- * Download report file
- */
-router.get("/:reportId/download", async (req: Request, res: Response) => {
-  try {
-    const buffer = await reportService.downloadReport(req.params.reportId);
-
-    if (!buffer) {
-      return res.status(404).json({ error: "Report not available" });
-    }
-
-    const report = reportService.getReportStatus(req.params.reportId);
-    const contentType = getContentType(report?.format || "json");
-    const filename = `report_${req.params.reportId}.${report?.format || "json"}`;
-
-    res.setHeader("Content-Type", contentType);
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
-    res.send(buffer);
-  } catch (error) {
-    res.status(400).json({
-      error: error instanceof Error ? error.message : "Failed to download report",
-    });
-  }
-});
-
-/**
- * DELETE /reports/:reportId
- * Cancel a pending report
- */
-router.delete("/:reportId", authMiddleware(), (req: Request, res: Response) => {
-  const success = reportService.cancelReport(req.params.reportId);
-
-  if (success) {
-    res.json({ success: true });
-  } else {
-    res.status(400).json({ error: "Cannot cancel report" });
-  }
-});
-
 // ============================================================================
 // FINANCIAL REPORTS
 // ============================================================================
@@ -106,7 +76,7 @@ router.delete("/:reportId", authMiddleware(), (req: Request, res: Response) => {
  * GET /reports/financial/:address
  * Get financial summary
  */
-router.get("/financial/:address", (req: Request, res: Response) => {
+router.get("/financial/:address", requireSelfOrAdmin(), (req: Request, res: Response) => {
   const { period = "month", currency, timezone } = req.query;
 
   const summary = reportService.getFinancialSummary(
@@ -125,7 +95,7 @@ router.get("/financial/:address", (req: Request, res: Response) => {
  * GET /reports/transactions/:address
  * Get transaction history
  */
-router.get("/transactions/:address", (req: Request, res: Response) => {
+router.get("/transactions/:address", requireSelfOrAdmin(), (req: Request, res: Response) => {
   const { campaignIds, minAmount, maxAmount } = req.query;
 
   const transactions = reportService.getTransactionHistory(req.params.address, {
@@ -141,7 +111,7 @@ router.get("/transactions/:address", (req: Request, res: Response) => {
  * GET /reports/payouts/:address
  * Get payout report
  */
-router.get("/payouts/:address", (req: Request, res: Response) => {
+router.get("/payouts/:address", requireSelfOrAdmin(), (req: Request, res: Response) => {
   const { period = "month" } = req.query;
 
   const payouts = reportService.getPayoutReport(req.params.address, period as any);
@@ -156,7 +126,7 @@ router.get("/payouts/:address", (req: Request, res: Response) => {
  * GET /reports/tax/:address/:year
  * Get tax summary
  */
-router.get("/tax/:address/:year", (req: Request, res: Response) => {
+router.get("/tax/:address/:year", requireSelfOrAdmin(), (req: Request, res: Response) => {
   const { country = "US" } = req.query;
 
   const summary = reportService.getTaxSummary(
@@ -172,7 +142,7 @@ router.get("/tax/:address/:year", (req: Request, res: Response) => {
  * POST /reports/tax/:address/form
  * Generate tax form
  */
-router.post("/tax/:address/form", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/tax/:address/form", requireSelfOrAdmin(), async (req: Request, res: Response) => {
   try {
     const { formType, year } = req.body;
 
@@ -195,10 +165,21 @@ router.post("/tax/:address/form", authMiddleware(), async (req: Request, res: Re
 // ============================================================================
 
 /**
+ * Only the campaign's creator (or an admin) sees its performance report
+ */
+const requireCampaignCreator = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  const campaign = await getStore().getCampaign(req.params.campaignId);
+  if (!campaign || (!sameAddress(campaign.creator, req.auth!.address) && !hasRole(req, "admin"))) {
+    return res.status(404).json({ error: "Campaign not found" });
+  }
+  next();
+});
+
+/**
  * GET /reports/campaigns/:campaignId/performance
  * Get campaign performance report
  */
-router.get("/campaigns/:campaignId/performance", (req: Request, res: Response) => {
+router.get("/campaigns/:campaignId/performance", requireCampaignCreator, (req: Request, res: Response) => {
   const { period } = req.query;
 
   const performance = reportService.getCampaignPerformance(
@@ -217,7 +198,7 @@ router.get("/campaigns/:campaignId/performance", (req: Request, res: Response) =
  * GET /reports/backers/:address/activity
  * Get backer activity report
  */
-router.get("/backers/:address/activity", (req: Request, res: Response) => {
+router.get("/backers/:address/activity", requireSelfOrAdmin(), (req: Request, res: Response) => {
   const { period } = req.query;
 
   const activity = reportService.getBackerActivity(req.params.address, period as any);
@@ -225,14 +206,14 @@ router.get("/backers/:address/activity", (req: Request, res: Response) => {
 });
 
 // ============================================================================
-// AUDIT
+// AUDIT & PLATFORM (admin)
 // ============================================================================
 
 /**
  * GET /reports/audit/:entityType/:entityId
  * Get audit trail
  */
-router.get("/audit/:entityType/:entityId", (req: Request, res: Response) => {
+router.get("/audit/:entityType/:entityId", requireRole("admin"), (req: Request, res: Response) => {
   const audit = reportService.getAuditTrail(
     req.params.entityType,
     req.params.entityId
@@ -241,15 +222,11 @@ router.get("/audit/:entityType/:entityId", (req: Request, res: Response) => {
   res.json(audit);
 });
 
-// ============================================================================
-// DISPUTES
-// ============================================================================
-
 /**
  * GET /reports/disputes
  * Get dispute summary
  */
-router.get("/disputes", (req: Request, res: Response) => {
+router.get("/disputes", requireRole("admin", "arbitrator"), (req: Request, res: Response) => {
   const summary = reportService.getDisputeSummary();
   res.json(summary);
 });
@@ -262,14 +239,14 @@ router.get("/disputes", (req: Request, res: Response) => {
  * POST /reports/exports
  * Request data export
  */
-router.post("/exports", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/exports", async (req: Request, res: Response) => {
   try {
-    const { dataType, format, filters, fields, requestedBy } = req.body;
+    const { dataType, format, filters, fields } = req.body;
 
     const exportRequest = await reportService.requestExport({
       dataType,
       format: format || "csv",
-      requestedBy: requestedBy || "anonymous",
+      requestedBy: req.auth!.address,
       filters,
       fields,
     });
@@ -287,13 +264,17 @@ router.post("/exports", authMiddleware(), async (req: Request, res: Response) =>
  * Get export status
  */
 router.get("/exports/:exportId", (req: Request, res: Response) => {
-  const exportStatus = reportService.getExportStatus(req.params.exportId);
+  const exportStatus = owned(
+    req,
+    res,
+    reportService.getExportStatus(req.params.exportId),
+    (e) => e.requestedBy,
+    "Export"
+  );
 
-  if (!exportStatus) {
-    return res.status(404).json({ error: "Export not found" });
+  if (exportStatus) {
+    res.json(exportStatus);
   }
-
-  res.json(exportStatus);
 });
 
 // ============================================================================
@@ -304,9 +285,12 @@ router.get("/exports/:exportId", (req: Request, res: Response) => {
  * POST /reports/scheduled
  * Create scheduled report
  */
-router.post("/scheduled", authMiddleware(), (req: Request, res: Response) => {
+router.post("/scheduled", (req: Request, res: Response) => {
   try {
-    const scheduled = reportService.createScheduledReport(req.body);
+    const scheduled = reportService.createScheduledReport({
+      ...req.body,
+      createdBy: req.auth!.address,
+    });
     res.status(201).json(scheduled);
   } catch (error) {
     res.status(400).json({
@@ -317,24 +301,38 @@ router.post("/scheduled", authMiddleware(), (req: Request, res: Response) => {
 
 /**
  * GET /reports/scheduled
- * List scheduled reports
+ * List your scheduled reports (admins may pass ?address=)
  */
 router.get("/scheduled", (req: Request, res: Response) => {
-  const { address } = req.query;
-  const reports = reportService.listScheduledReports(address as string || "");
+  const requested = req.query.address as string | undefined;
+  const address = requested && hasRole(req, "admin") ? requested : req.auth!.address;
+  const reports = reportService.listScheduledReports(address);
   res.json({ reports });
 });
+
+function ownedSchedule(req: Request, res: Response) {
+  return owned(
+    req,
+    res,
+    reportService.getScheduledReport(req.params.reportId),
+    (r) => r.createdBy,
+    "Scheduled report"
+  );
+}
 
 /**
  * PUT /reports/scheduled/:reportId
  * Update scheduled report
  */
-router.put("/scheduled/:reportId", authMiddleware(), (req: Request, res: Response) => {
+router.put("/scheduled/:reportId", (req: Request, res: Response) => {
+  if (!ownedSchedule(req, res)) return;
+
   try {
-    const updated = reportService.updateScheduledReport(
-      req.params.reportId,
-      req.body
-    );
+    // Ownership and identity are not editable
+    const updates = { ...req.body };
+    delete updates.createdBy;
+    delete updates.id;
+    const updated = reportService.updateScheduledReport(req.params.reportId, updates);
     res.json(updated);
   } catch (error) {
     res.status(400).json({
@@ -347,21 +345,20 @@ router.put("/scheduled/:reportId", authMiddleware(), (req: Request, res: Respons
  * DELETE /reports/scheduled/:reportId
  * Delete scheduled report
  */
-router.delete("/scheduled/:reportId", authMiddleware(), (req: Request, res: Response) => {
-  const success = reportService.deleteScheduledReport(req.params.reportId);
+router.delete("/scheduled/:reportId", (req: Request, res: Response) => {
+  if (!ownedSchedule(req, res)) return;
 
-  if (success) {
-    res.json({ success: true });
-  } else {
-    res.status(404).json({ error: "Scheduled report not found" });
-  }
+  reportService.deleteScheduledReport(req.params.reportId);
+  res.json({ success: true });
 });
 
 /**
  * POST /reports/scheduled/:reportId/run
  * Run scheduled report now
  */
-router.post("/scheduled/:reportId/run", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/scheduled/:reportId/run", async (req: Request, res: Response) => {
+  if (!ownedSchedule(req, res)) return;
+
   try {
     const report = await reportService.runScheduledReport(req.params.reportId);
     res.json(report);
@@ -369,6 +366,77 @@ router.post("/scheduled/:reportId/run", authMiddleware(), async (req: Request, r
     res.status(400).json({
       error: error instanceof Error ? error.message : "Failed to run scheduled report",
     });
+  }
+});
+
+// ============================================================================
+// INDIVIDUAL REPORTS
+// Registered last: "/:reportId" would otherwise capture paths such as
+// "/scheduled" and "/disputes".
+// ============================================================================
+
+function ownedReport(req: Request, res: Response) {
+  return owned(
+    req,
+    res,
+    reportService.getReportStatus(req.params.reportId),
+    (r) => r.requestedBy,
+    "Report"
+  );
+}
+
+/**
+ * GET /reports/:reportId
+ * Get report status
+ */
+router.get("/:reportId", (req: Request, res: Response) => {
+  const report = ownedReport(req, res);
+  if (report) {
+    res.json(report);
+  }
+});
+
+/**
+ * GET /reports/:reportId/download
+ * Download report file
+ */
+router.get("/:reportId/download", async (req: Request, res: Response) => {
+  const report = ownedReport(req, res);
+  if (!report) return;
+
+  try {
+    const buffer = await reportService.downloadReport(req.params.reportId);
+
+    if (!buffer) {
+      return res.status(404).json({ error: "Report not available" });
+    }
+
+    const contentType = getContentType(report.format || "json");
+    const filename = `report_${req.params.reportId}.${report.format || "json"}`;
+
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(buffer);
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Failed to download report",
+    });
+  }
+});
+
+/**
+ * DELETE /reports/:reportId
+ * Cancel a pending report
+ */
+router.delete("/:reportId", (req: Request, res: Response) => {
+  if (!ownedReport(req, res)) return;
+
+  const success = reportService.cancelReport(req.params.reportId);
+
+  if (success) {
+    res.json({ success: true });
+  } else {
+    res.status(400).json({ error: "Cannot cancel report" });
   }
 });
 
