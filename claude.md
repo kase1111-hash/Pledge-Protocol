@@ -42,7 +42,7 @@ src/
   ├── governance/    # Dispute resolution
   ├── security/      # Auth, rate limiting, audit
   ├── infrastructure/# Caching, jobs, health checks
-  └── database/      # PostgreSQL schema
+  └── database/      # Persistent store (PostgreSQL / in-memory)
 
 test/                # Test suites by phase
 ```

@@ -14,10 +14,14 @@
  * // List campaigns
  * const campaigns = await client.campaigns.list({ status: 'active' });
  *
- * // Create a pledge
+ * // Sign in with a wallet (e.g. an ethers Wallet or browser signer)
+ * await client.signIn(wallet.address, (message) => wallet.signMessage(message));
+ *
+ * // Pledge 1 ETH using the campaign's first pledge type
  * const pledge = await client.pledges.create({
- *   campaignId: 'camp-123',
- *   calculation: { type: 'flat', baseAmount: '1000000000000000000' },
+ *   campaignId: 'campaign_1234abcd',
+ *   pledgeTypeId: 'pt_0',
+ *   amount: '1000000000000000000',
  * });
  * ```
  */

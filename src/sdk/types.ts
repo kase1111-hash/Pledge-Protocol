@@ -1,9 +1,52 @@
 /**
  * Pledge Protocol SDK Types
- * Phase 8: Ecosystem Expansion - TypeScript SDK for developers
+ *
+ * Campaign, pledge and oracle shapes are the API's own domain types, so the
+ * SDK and the server cannot drift apart. Amounts are wei as integer strings;
+ * timestamps are unix seconds unless noted otherwise.
  */
 
 import { ChainId } from "../multichain/config";
+import type {
+  Campaign,
+  CampaignStatus,
+  CampaignVisibility,
+  MilestoneCondition,
+  Oracle as OracleRecord,
+  Pledge,
+  PledgeCondition,
+  PledgeStatus,
+  Subject,
+  Tier,
+  CalculationType,
+} from "../database/types";
+import type { UserProfile as SocialUserProfile } from "../social/types";
+import type {
+  Dispute as DisputeRecord,
+  DisputeCategory,
+  DisputeStatus,
+  ResolutionTier,
+  VoteOption,
+} from "../governance/types";
+
+export type {
+  Attestation,
+  CalculationType,
+  Campaign,
+  CampaignStatus,
+  CampaignVisibility,
+  ConditionOperator,
+  Milestone,
+  MilestoneCondition,
+  MilestoneStatus,
+  Pledge,
+  PledgeCondition,
+  PledgeStatus,
+  PledgeType,
+  Subject,
+  Tier,
+} from "../database/types";
+export type { DisputeCategory, DisputeStatus, ResolutionTier, VoteOption } from "../governance/types";
 
 // ============================================================================
 // BASE TYPES
@@ -20,391 +63,248 @@ export type Address = `0x${string}`;
 export type TransactionHash = `0x${string}`;
 
 /**
- * Block number
- */
-export type BlockNumber = number;
-
-/**
- * Unix timestamp in milliseconds
- */
-export type Timestamp = number;
-
-/**
  * Amount in wei (string for bigint serialization)
  */
 export type WeiAmount = string;
 
 // ============================================================================
-// CAMPAIGN TYPES
+// CAMPAIGNS
 // ============================================================================
 
 /**
- * Campaign status
- */
-export type CampaignStatus =
-  | "draft"
-  | "active"
-  | "paused"
-  | "resolved"
-  | "cancelled"
-  | "expired";
-
-/**
- * Campaign category
- */
-export type CampaignCategory =
-  | "fitness"
-  | "creative"
-  | "education"
-  | "opensource"
-  | "business"
-  | "research"
-  | "charity"
-  | "other";
-
-/**
- * Campaign milestone
- */
-export interface Milestone {
-  id: string;
-  name: string;
-  description: string;
-  targetDate: Timestamp;
-  oracleId: string;
-  verified: boolean;
-  verifiedAt?: Timestamp;
-  verificationData?: Record<string, any>;
-  releasePercentage: number;
-}
-
-/**
- * Campaign data
- */
-export interface Campaign {
-  id: string;
-  name: string;
-  description: string;
-  category: CampaignCategory;
-  status: CampaignStatus;
-  creator: Address;
-  beneficiary: Address;
-  goalAmount: WeiAmount;
-  totalPledged: WeiAmount;
-  backerCount: number;
-  pledgeCount: number;
-  milestones: Milestone[];
-  deadline: Timestamp;
-  createdAt: Timestamp;
-  activatedAt?: Timestamp;
-  resolvedAt?: Timestamp;
-  metadata?: {
-    imageUrl?: string;
-    websiteUrl?: string;
-    socialLinks?: Record<string, string>;
-    tags?: string[];
-  };
-  chainDeployments?: {
-    chainId: ChainId;
-    contractAddress: Address;
-    escrowAddress: Address;
-  }[];
-}
-
-/**
- * Campaign creation request
+ * Campaign creation request (POST /v1/campaigns)
  */
 export interface CreateCampaignRequest {
   name: string;
   description: string;
-  category: CampaignCategory;
   beneficiary: Address;
-  goalAmount: WeiAmount;
-  deadline: Timestamp;
-  milestones: Omit<Milestone, "id" | "verified" | "verifiedAt" | "verificationData">[];
-  metadata?: Campaign["metadata"];
-  deployToChains?: ChainId[];
+  beneficiaryName: string;
+  subject?: Subject | null;
+  pledgeWindowStart: number;
+  pledgeWindowEnd: number;
+  eventDate?: number | null;
+  resolutionDeadline: number;
+  milestones: {
+    name: string;
+    description: string;
+    /** A registered oracle (GET /v1/oracles) */
+    oracleId: string;
+    oracleParams?: Record<string, unknown>;
+    condition: MilestoneCondition;
+    /** Percentages across all milestones must sum to 100 */
+    releasePercentage: number;
+  }[];
+  pledgeTypes: {
+    name: string;
+    description: string;
+    calculationType: CalculationType;
+    baseAmount?: WeiAmount | null;
+    perUnitAmount?: WeiAmount | null;
+    unitField?: string | null;
+    cap?: WeiAmount | null;
+    tiers?: Tier[] | null;
+    condition?: PledgeCondition | null;
+    minimum: WeiAmount;
+    maximum?: WeiAmount | null;
+  }[];
+  minimumPledge: WeiAmount;
+  maximumPledge?: WeiAmount | null;
+  visibility?: CampaignVisibility;
 }
 
-/**
- * Campaign update request
- */
-export interface UpdateCampaignRequest {
-  name?: string;
-  description?: string;
-  metadata?: Campaign["metadata"];
-}
-
-// ============================================================================
-// PLEDGE TYPES
-// ============================================================================
-
-/**
- * Pledge status
- */
-export type PledgeStatus =
-  | "pending"
-  | "escrowed"
-  | "partially_released"
-  | "released"
-  | "refunded"
-  | "cancelled";
-
-/**
- * Pledge calculation type
- */
-export type PledgeCalculationType = "flat" | "per_unit" | "tiered" | "conditional";
-
-/**
- * Conditional operator
- */
-export type ConditionalOperator =
-  | "exists"
-  | "eq"
-  | "gt"
-  | "gte"
-  | "lt"
-  | "lte"
-  | "between";
-
-/**
- * Tiered rate definition
- */
-export interface TieredRate {
-  threshold: number;
-  rate: WeiAmount;
-}
-
-/**
- * Pledge calculation configuration
- */
-export interface PledgeCalculation {
-  type: PledgeCalculationType;
-
-  // Flat pledge
-  baseAmount?: WeiAmount;
-
-  // Per-unit pledge
-  perUnitAmount?: WeiAmount;
-  unitField?: string;
-
-  // Tiered pledge
-  tiers?: TieredRate[];
-
-  // Conditional pledge
-  condition?: {
-    field: string;
-    operator: ConditionalOperator;
-    value?: any;
-    valueEnd?: any;
-  };
-
-  // Common
-  cap?: WeiAmount;
-  minimum?: WeiAmount;
-}
-
-/**
- * Pledge data
- */
-export interface Pledge {
-  id: string;
+export interface CampaignStats {
   campaignId: string;
-  backer: Address;
-  status: PledgeStatus;
-  calculation: PledgeCalculation;
-  escrowedAmount: WeiAmount;
-  releasedAmount: WeiAmount;
-  refundedAmount: WeiAmount;
-  chainId: ChainId;
-  transactionHash?: TransactionHash;
-  tokenId?: string;
-  commemorativeId?: string;
-  createdAt: Timestamp;
-  escrowedAt?: Timestamp;
-  resolvedAt?: Timestamp;
+  totalEscrowed: WeiAmount;
+  totalReleased: WeiAmount;
+  totalRefunded: WeiAmount;
+  pledgeCount: number;
+  milestonesCompleted: number;
+  milestonesTotal: number;
 }
 
+export interface CampaignResolution {
+  id: string;
+  status: CampaignStatus;
+  resolution: {
+    totalReleased: WeiAmount;
+    totalRefunded: WeiAmount;
+    pledgesResolved: number;
+    milestonesVerified: number;
+    milestonesFailed: number;
+  };
+  milestones: { id: string; status: string }[];
+}
+
+export interface MilestoneVerification {
+  campaignId: string;
+  milestoneId: string;
+  verified: boolean;
+  status: "verified" | "pending";
+  oracleData: unknown;
+  error?: string;
+}
+
+// ============================================================================
+// PLEDGES
+// ============================================================================
+
 /**
- * Pledge creation request
+ * Pledge creation request (POST /v1/pledges)
  */
 export interface CreatePledgeRequest {
   campaignId: string;
-  calculation: PledgeCalculation;
-  chainId?: ChainId;
+  /** One of the campaign's pledge types, e.g. "pt_0" */
+  pledgeTypeId: string;
+  /** Amount to escrow, in wei */
+  amount: WeiAmount;
+  backerName?: string | null;
 }
 
-// ============================================================================
-// ORACLE TYPES
-// ============================================================================
-
 /**
- * Oracle provider type
+ * Pledge as returned by the pledge endpoints
  */
-export type OracleProviderType =
-  | "api"
-  | "race_timing"
-  | "github"
-  | "strava"
-  | "academic"
-  | "streaming"
-  | "aggregator"
-  | "manual";
+export type PledgeView = Omit<Pledge, "chainId" | "tokenId"> & {
+  token: { tokenId: string; imageUri: string } | null;
+};
 
-/**
- * Oracle status
- */
-export type OracleStatus = "active" | "inactive" | "error";
-
-/**
- * Oracle configuration
- */
-export interface Oracle {
+export interface CancelPledgeResult {
   id: string;
-  name: string;
-  providerType: OracleProviderType;
-  status: OracleStatus;
-  config: Record<string, any>;
-  lastQueryAt?: Timestamp;
-  lastResponseAt?: Timestamp;
-  errorCount: number;
+  status: PledgeStatus;
+  refundedAmount: WeiAmount;
+  refundTxHash: TransactionHash | null;
 }
+
+// ============================================================================
+// ORACLES
+// ============================================================================
+
+/**
+ * Oracle as returned by the API (its config is never exposed)
+ */
+export type Oracle = Omit<OracleRecord, "config">;
 
 /**
  * Oracle query result
  */
 export interface OracleQueryResult {
-  oracleId: string;
-  timestamp: Timestamp;
   success: boolean;
-  data?: Record<string, any>;
-  error?: string;
+  data: Record<string, unknown> | null;
+  timestamp?: number;
+  source?: string;
   cached: boolean;
+  error?: string;
+  message?: string;
 }
 
-// ============================================================================
-// DISPUTE TYPES
-// ============================================================================
-
 /**
- * Dispute status
+ * Attestation submission (POST /v1/oracles/attestations). The signed-in
+ * account must be the attestor of the milestone's oracle.
  */
-export type DisputeStatus =
-  | "pending"
-  | "reviewing"
-  | "voting"
-  | "escalated"
-  | "resolved"
-  | "appealed"
-  | "closed";
-
-/**
- * Dispute category
- */
-export type DisputeCategory =
-  | "oracle_disagreement"
-  | "oracle_failure"
-  | "milestone_dispute"
-  | "calculation_error"
-  | "fraud_claim"
-  | "technical_issue"
-  | "other";
-
-/**
- * Resolution tier
- */
-export type ResolutionTier = "automated" | "community" | "creator" | "council";
-
-/**
- * Vote option
- */
-export type VoteOption = "release" | "refund" | "partial" | "abstain";
-
-/**
- * Dispute data
- */
-export interface Dispute {
-  id: string;
+export interface SubmitAttestationRequest {
   campaignId: string;
-  pledgeId?: string;
-  milestoneId?: string;
-  status: DisputeStatus;
-  category: DisputeCategory;
-  tier: ResolutionTier;
-  title: string;
-  description: string;
-  raisedBy: Address;
-  raisedAt: Timestamp;
-  resolution?: {
-    outcome: VoteOption;
-    rationale: string;
-    resolvedBy: Address;
-    resolvedAt: Timestamp;
-    partialPercentage?: number;
-  };
+  milestoneId: string;
+  completed: boolean;
+  value?: number | null;
+  evidenceUri?: string | null;
+  notes?: string | null;
+  signature?: string;
 }
+
+export interface AttestationResult {
+  attestationId: string;
+  milestoneId: string;
+  milestoneStatus: "verified" | "failed";
+  submittedAt: number;
+}
+
+// ============================================================================
+// DISPUTES
+// ============================================================================
+
+/**
+ * Dispute as returned by the API (bigint amounts serialized as strings)
+ */
+export type Dispute = Omit<DisputeRecord, "totalEscrowedAmount" | "voteTally"> & {
+  totalEscrowedAmount: WeiAmount;
+  voteTally?: Record<string, unknown>;
+};
 
 /**
  * Create dispute request
  */
 export interface CreateDisputeRequest {
   campaignId: string;
-  pledgeId?: string;
+  pledgeIds?: string[];
   milestoneId?: string;
   category: DisputeCategory;
   title: string;
   description: string;
+  initialEvidence?: DisputeEvidence[];
+}
+
+export interface DisputeEvidence {
+  type: "document" | "screenshot" | "api_response" | "attestation" | "link" | "text";
+  title: string;
+  description: string;
+  content: string;
+  contentHash?: string;
+}
+
+/**
+ * A vote on a dispute. The voter is the signed-in account and its voting
+ * power is the one assigned when voting opened.
+ */
+export interface CastVoteRequest {
+  vote: VoteOption;
+  partialPercent?: number;
+  reason?: string;
 }
 
 // ============================================================================
-// COMMEMORATIVE TYPES
+// COMMEMORATIVES
 // ============================================================================
 
 /**
- * Commemorative token data
+ * Commemorative token record
  */
 export interface Commemorative {
   id: string;
   pledgeId: string;
   campaignId: string;
-  backer: Address;
-  tokenId: string;
+  backerAddress: Address;
+  imageUri: string;
+  metadataUri: string;
   imageUrl: string;
   metadataUrl: string;
-  mintedAt: Timestamp;
-  chainId: ChainId;
-  transactionHash?: TransactionHash;
-  attributes: {
-    campaignName: string;
-    contributionAmount: WeiAmount;
-    outcomeSummary: string;
-    backedAt: Timestamp;
-    resolvedAt: Timestamp;
-  };
+  storageProvider: "ipfs" | "arweave";
+  minted: boolean;
+  tokenId?: number;
+  txHash?: TransactionHash;
+  /** Milliseconds */
+  mintedAt?: number;
+  /** Milliseconds */
+  createdAt: number;
+  metadata: Record<string, unknown>;
 }
 
+/**
+ * Commemorative as listed per campaign or backer (a subset of the record)
+ */
+export type CommemorativeSummary = Pick<
+  Commemorative,
+  "id" | "pledgeId" | "imageUrl" | "metadataUrl" | "minted" | "tokenId"
+>;
+
 // ============================================================================
-// USER TYPES
+// USERS
 // ============================================================================
 
 /**
- * User profile
+ * User profile (preferences only appear on your own profile)
  */
-export interface UserProfile {
-  address: Address;
-  name?: string;
-  avatar?: string;
-  bio?: string;
-  socialLinks?: Record<string, string>;
-  createdAt: Timestamp;
-  stats: {
-    campaignsCreated: number;
-    campaignsBacked: number;
-    totalPledged: WeiAmount;
-    totalRaised: WeiAmount;
-    successRate: number;
-  };
-  badges?: string[];
-}
+export type UserProfile = Omit<SocialUserProfile, "preferences"> & {
+  preferences?: SocialUserProfile["preferences"];
+};
 
 // ============================================================================
 // SDK CONFIGURATION
@@ -428,8 +328,12 @@ export interface SDKConfig {
 export interface APIResponse<T> {
   success: boolean;
   data?: T;
+  /** Human-readable error message */
   error?: string;
+  /** Machine-readable error code, e.g. "CAMPAIGN_NOT_FOUND" */
   code?: string;
+  /** HTTP status of a failed request (absent for network errors) */
+  status?: number;
   requestId?: string;
 }
 
@@ -445,27 +349,19 @@ export interface PaginatedResponse<T> {
 }
 
 /**
- * List options for pagination and filtering
+ * List options for pagination (pages start at 1; limit is at most 100)
  */
 export interface ListOptions {
   page?: number;
   limit?: number;
-  sort?: string;
-  order?: "asc" | "desc";
 }
 
 /**
- * Campaign list options
+ * Campaign list options. Only public campaigns are listed.
  */
 export interface CampaignListOptions extends ListOptions {
   status?: CampaignStatus;
-  category?: CampaignCategory;
   creator?: Address;
-  chainId?: ChainId;
-  query?: string;
-  tags?: string[];
-  minPledged?: WeiAmount;
-  maxPledged?: WeiAmount;
 }
 
 /**
@@ -475,5 +371,4 @@ export interface PledgeListOptions extends ListOptions {
   campaignId?: string;
   backer?: Address;
   status?: PledgeStatus;
-  chainId?: ChainId;
 }
