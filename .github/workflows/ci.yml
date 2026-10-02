@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pledge
+          POSTGRES_PASSWORD: pledge
+          POSTGRES_DB: pledge_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pledge"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      # Runs the store, API integration and restart suites against PostgreSQL
+      TEST_DATABASE_URL: postgres://pledge:pledge@localhost:5432/pledge_test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Generates the TypeChain bindings the typecheck and contract tests use
+      - run: npm run compile
+
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run test:unit
+      - run: npm run test:contracts

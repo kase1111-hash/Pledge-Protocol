@@ -223,6 +223,22 @@ This is commitment infrastructure. Making pledges real.
 - **IPFS/Arweave**: Permanent storage of campaign data and commemoratives
 - **Oracle networks**: Verified external data sources
 
+## Running the API
+
+```bash
+npm run build
+DATABASE_TYPE=postgresql DATABASE_URL=postgres://user:pass@host:5432/pledge \
+ADMIN_ADDRESSES=0xYourWallet CORS_ORIGINS=https://app.example.com \
+NODE_ENV=production npm run api:start
+```
+
+- **Storage.** With `DATABASE_TYPE=postgresql` the schema is created and migrated on startup, and the server refuses to start if the database is unreachable. `DATABASE_TYPE=memory` is for development only.
+- **What is stored where.** Campaigns, pledges, oracles and attestations live in their own tables with row locking. All other service state (sessions and roles, disputes, payments, social data, notifications, organizations, compliance records, scheduled resolutions, jobs, …) is loaded into memory at startup and written back before the API answers any request that changed it. That design assumes **a single API instance**; running several against one database would let their in-memory copies diverge.
+- **Access.** Sign in with a wallet signature (`/v1/auth/challenge`, `/v1/auth/verify`) and send the session as `Authorization: Bearer <sessionId>`. `ADMIN_ADDRESSES` bootstraps administrators, who can grant roles (`arbitrator`, `creator`, …) through `/v1/auth/roles/:address`.
+- **Webhooks** are only delivered to public addresses; set `ALLOW_PRIVATE_WEBHOOK_TARGETS=true` for local development.
+
+See `.env.example` for every setting.
+
 ## API Reference
 
 ### Advanced Pledge Types (Phase 4)
