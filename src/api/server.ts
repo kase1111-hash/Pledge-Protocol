@@ -12,7 +12,7 @@ import { oracleCache, campaignCache, sessionCache, generalCache } from "../infra
 import { authService } from "../security/auth-service";
 import { ipRateLimiter, userRateLimiter, endpointRateLimiter } from "../security/rate-limiter";
 import { logger } from "../security/audit-logger";
-import { initializeDatabase, closeDatabase } from "../database";
+import { initializeDatabase, closeDatabase, PostgresStore } from "../database";
 import { restorePersistentState, flushPersistentState } from "./persistence";
 import { reportService } from "../reporting";
 import { gdprService } from "./routes/compliance";
@@ -50,7 +50,15 @@ const dbType = (env.DATABASE_TYPE === "postgres" || env.DATABASE_TYPE === "postg
 initializeDatabase({
   type: dbType,
   connectionString: env.DATABASE_URL,
-}).then(async () => {
+}).then(async (store) => {
+  // One instance per database: see PostgresStore.acquireInstanceLock
+  if (store instanceof PostgresStore) {
+    await store.acquireInstanceLock((error) => {
+      logger.error("Lost the database connection holding the instance lock; exiting", error);
+      process.exit(1);
+    });
+  }
+
   await initializeOracles();
   // Load persisted service state before serving or running background work
   await restorePersistentState();

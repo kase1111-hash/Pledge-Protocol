@@ -195,4 +195,19 @@ describe.skipIf(!TEST_DATABASE_URL)("state survives a server restart", () => {
 
     expect((await call("GET", `/v1/i18n/preferences/${user.address}`, userSession)).body.locale).toBe("fr");
   }, 120_000);
+
+  it("refuses to start a second instance on the same database", async () => {
+    await resetPostgres(SCHEMA);
+
+    const first = await startServer({});
+    servers.push(first);
+
+    await expect(startServer({})).rejects.toThrow(/Another Pledge Protocol API instance is already running/);
+
+    // Once the first instance stops, another may start
+    await first.stop();
+    const next = await startServer({});
+    servers.push(next);
+    expect((await fetch(`${next.url}/health`)).ok).toBe(true);
+  }, 120_000);
 });
