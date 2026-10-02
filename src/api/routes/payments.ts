@@ -11,6 +11,14 @@ import {
   createPaymentProcessor,
   DEFAULT_PAYMENT_CONFIG,
 } from "../../payments";
+import {
+  authMiddleware,
+  asyncHandler,
+  hasRole,
+  rawBodyOf,
+  requireRole,
+  sameAddress,
+} from "../../security/middleware";
 
 const router = Router();
 
@@ -79,6 +87,29 @@ function errorResponse(code: string, message: string, details?: object | unknown
   return response;
 }
 
+function forbidden(res: Response, message: string) {
+  return res.status(403).json(errorResponse("FORBIDDEN", message));
+}
+
+/**
+ * Loads a checkout session and checks the caller is its backer (or an admin).
+ * Sends the error response and returns null otherwise.
+ */
+async function ownedSession(req: Request, res: Response) {
+  let session;
+  try {
+    session = await paymentProcessor.getCheckout(req.params.sessionId);
+  } catch {
+    res.status(404).json(errorResponse("SESSION_NOT_FOUND", "Session not found"));
+    return null;
+  }
+  if (!sameAddress(session.backerAddress, req.auth!.address) && !hasRole(req, "admin")) {
+    forbidden(res, "Not your checkout session");
+    return null;
+  }
+  return session;
+}
+
 // Initialize payment processor
 // SECURITY: Require payment credentials in production - no fallback test keys
 function getRequiredEnv(key: string): string {
@@ -112,13 +143,17 @@ const paymentProcessor = createPaymentProcessor({
  * Create checkout session
  * POST /v1/payments/checkout
  */
-router.post("/checkout", async (req: Request, res: Response) => {
+router.post("/checkout", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const parsed = CheckoutSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json(
         errorResponse("INVALID_REQUEST", "Invalid request body", parsed.error.errors)
       );
+    }
+
+    if (!sameAddress(parsed.data.backerAddress, req.auth!.address)) {
+      return forbidden(res, "backerAddress must be your own address");
     }
 
     const result = await paymentProcessor.createCheckout(parsed.data);
@@ -135,23 +170,20 @@ router.post("/checkout", async (req: Request, res: Response) => {
  * Get checkout session
  * GET /v1/payments/checkout/:sessionId
  */
-router.get("/checkout/:sessionId", async (req: Request, res: Response) => {
-  try {
-    const session = await paymentProcessor.getCheckout(req.params.sessionId);
+router.get("/checkout/:sessionId", authMiddleware(), asyncHandler(async (req: Request, res: Response) => {
+  const session = await ownedSession(req, res);
+  if (session) {
     res.json(session);
-  } catch (error) {
-    res.status(404).json(
-      errorResponse("SESSION_NOT_FOUND", error instanceof Error ? error.message : "Session not found")
-    );
   }
-});
+}));
 
 /**
  * Expire checkout session
  * POST /v1/payments/checkout/:sessionId/expire
  */
-router.post("/checkout/:sessionId/expire", async (req: Request, res: Response) => {
+router.post("/checkout/:sessionId/expire", authMiddleware(), async (req: Request, res: Response) => {
   try {
+    if (!(await ownedSession(req, res))) return;
     await paymentProcessor.expireCheckout(req.params.sessionId);
     res.json({ success: true });
   } catch (error) {
@@ -169,8 +201,9 @@ router.post("/checkout/:sessionId/expire", async (req: Request, res: Response) =
  * Confirm payment
  * POST /v1/payments/:sessionId/confirm
  */
-router.post("/:sessionId/confirm", async (req: Request, res: Response) => {
+router.post("/:sessionId/confirm", authMiddleware(), async (req: Request, res: Response) => {
   try {
+    if (!(await ownedSession(req, res))) return;
     const { settle = true } = req.body;
     const session = await paymentProcessor.confirmPayment(req.params.sessionId, {
       settle,
@@ -191,7 +224,7 @@ router.post("/:sessionId/confirm", async (req: Request, res: Response) => {
  * Settle payment to escrow
  * POST /v1/payments/:sessionId/settle
  */
-router.post("/:sessionId/settle", async (req: Request, res: Response) => {
+router.post("/:sessionId/settle", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const result = await paymentProcessor.settlePayment(req.params.sessionId);
     res.json(result);
@@ -206,7 +239,7 @@ router.post("/:sessionId/settle", async (req: Request, res: Response) => {
  * Get settlement status
  * GET /v1/payments/settlements/:settlementId
  */
-router.get("/settlements/:settlementId", async (req: Request, res: Response) => {
+router.get("/settlements/:settlementId", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const settlement = paymentProcessor.getSettlement(req.params.settlementId);
     if (!settlement) {
@@ -228,7 +261,7 @@ router.get("/settlements/:settlementId", async (req: Request, res: Response) => 
  * Create refund
  * POST /v1/payments/refunds
  */
-router.post("/refunds", async (req: Request, res: Response) => {
+router.post("/refunds", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const parsed = RefundSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -251,7 +284,7 @@ router.post("/refunds", async (req: Request, res: Response) => {
  * Get refund status
  * GET /v1/payments/refunds/:refundId
  */
-router.get("/refunds/:refundId", async (req: Request, res: Response) => {
+router.get("/refunds/:refundId", authMiddleware(), requireRole("admin", "system"), async (req: Request, res: Response) => {
   try {
     const refund = await paymentProcessor.getRefund(req.params.refundId);
     res.json(refund);
@@ -270,13 +303,17 @@ router.get("/refunds/:refundId", async (req: Request, res: Response) => {
  * Create subscription
  * POST /v1/payments/subscriptions
  */
-router.post("/subscriptions", async (req: Request, res: Response) => {
+router.post("/subscriptions", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const parsed = SubscriptionSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json(
         errorResponse("INVALID_REQUEST", "Invalid request body", parsed.error.errors)
       );
+    }
+
+    if (!sameAddress(parsed.data.backerAddress, req.auth!.address)) {
+      return forbidden(res, "backerAddress must be your own address");
     }
 
     const subscription = await paymentProcessor.createSubscription(parsed.data);
@@ -293,8 +330,11 @@ router.post("/subscriptions", async (req: Request, res: Response) => {
  * Cancel subscription
  * POST /v1/payments/subscriptions/:subscriptionId/cancel
  */
+// Admin only: the processor cannot yet look up a subscription's owner
 router.post(
   "/subscriptions/:subscriptionId/cancel",
+  authMiddleware(),
+  requireRole("admin"),
   async (req: Request, res: Response) => {
     try {
       const subscription = await paymentProcessor.cancelSubscription(
@@ -317,14 +357,9 @@ router.post(
  * List saved payment methods
  * GET /v1/payments/methods
  */
-router.get("/methods", async (req: Request, res: Response) => {
+router.get("/methods", authMiddleware(), async (req: Request, res: Response) => {
   try {
-    const userAddress = req.query.userAddress as string;
-    if (!userAddress) {
-      return res.status(400).json({ error: "userAddress is required" });
-    }
-
-    const methods = await paymentProcessor.listPaymentMethods(userAddress);
+    const methods = await paymentProcessor.listPaymentMethods(req.auth!.address);
     res.json(methods);
   } catch (error) {
     res.status(500).json({
@@ -337,8 +372,12 @@ router.get("/methods", async (req: Request, res: Response) => {
  * Delete payment method
  * DELETE /v1/payments/methods/:methodId
  */
-router.delete("/methods/:methodId", async (req: Request, res: Response) => {
+router.delete("/methods/:methodId", authMiddleware(), async (req: Request, res: Response) => {
   try {
+    const owned = await paymentProcessor.listPaymentMethods(req.auth!.address);
+    if (!owned.some((m) => m.id === req.params.methodId)) {
+      return res.status(404).json(errorResponse("METHOD_NOT_FOUND", "Payment method not found"));
+    }
     await paymentProcessor.deletePaymentMethod(req.params.methodId);
     res.json({ success: true });
   } catch (error) {
@@ -356,13 +395,17 @@ router.delete("/methods/:methodId", async (req: Request, res: Response) => {
  * Initiate KYC verification
  * POST /v1/payments/kyc
  */
-router.post("/kyc", async (req: Request, res: Response) => {
+router.post("/kyc", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const parsed = KycSchema.safeParse(req.body);
     if (!parsed.success) {
       return res.status(400).json(
         errorResponse("INVALID_REQUEST", "Invalid request body", parsed.error.errors)
       );
+    }
+
+    if (!sameAddress(parsed.data.userAddress, req.auth!.address)) {
+      return forbidden(res, "userAddress must be your own address");
     }
 
     const result = await paymentProcessor.initiateKyc(parsed.data);
@@ -379,9 +422,12 @@ router.post("/kyc", async (req: Request, res: Response) => {
  * Get KYC status
  * GET /v1/payments/kyc/:kycId
  */
-router.get("/kyc/:kycId", async (req: Request, res: Response) => {
+router.get("/kyc/:kycId", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const kyc = await paymentProcessor.getKycStatus(req.params.kycId);
+    if (!sameAddress(kyc.userAddress, req.auth!.address) && !hasRole(req, "admin")) {
+      return res.status(404).json({ error: "KYC record not found" });
+    }
     res.json(kyc);
   } catch (error) {
     res.status(404).json({
@@ -403,7 +449,7 @@ router.post("/webhooks/stripe", async (req: Request, res: Response) => {
     const signature = req.headers["stripe-signature"] as string;
     const webhook = await paymentProcessor.handleWebhook(
       "stripe",
-      JSON.stringify(req.body),
+      rawBodyOf(req),
       signature
     );
     res.json({ received: true, event: webhook.event });
@@ -423,7 +469,7 @@ router.post("/webhooks/circle", async (req: Request, res: Response) => {
     const signature = req.headers["x-circle-signature"] as string;
     const webhook = await paymentProcessor.handleWebhook(
       "circle",
-      JSON.stringify(req.body),
+      rawBodyOf(req),
       signature
     );
     res.json({ received: true, event: webhook.event });
@@ -442,7 +488,7 @@ router.post("/webhooks/circle", async (req: Request, res: Response) => {
  * Get payment analytics
  * GET /v1/payments/analytics
  */
-router.get("/analytics", async (req: Request, res: Response) => {
+router.get("/analytics", authMiddleware(), requireRole("admin"), async (req: Request, res: Response) => {
   try {
     const periodStart = req.query.start
       ? parseInt(req.query.start as string)
@@ -464,7 +510,7 @@ router.get("/analytics", async (req: Request, res: Response) => {
  * Get settlement statistics
  * GET /v1/payments/analytics/settlements
  */
-router.get("/analytics/settlements", async (req: Request, res: Response) => {
+router.get("/analytics/settlements", authMiddleware(), requireRole("admin"), async (req: Request, res: Response) => {
   try {
     const stats = paymentProcessor.getSettlementStats();
     res.json(stats);

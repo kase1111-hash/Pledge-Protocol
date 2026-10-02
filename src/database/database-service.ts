@@ -1,221 +1,88 @@
 /**
  * Database Service
- * Main entry point for database operations
  *
- * Provides a unified interface that can be backed by either:
- * - In-memory storage (development/testing)
- * - PostgreSQL (production)
+ * Owns the process-wide DomainStore. Call initializeDatabase() once at
+ * startup; routes then use getStore().
  *
- * Usage:
- *   import { db, initializeDatabase } from '../database';
+ *   DATABASE_TYPE=postgresql  DATABASE_URL=postgres://user:pass@host:5432/db
+ *   DATABASE_TYPE=memory      (development/tests; data is lost on restart)
  *
- *   // Initialize database (call once at startup)
- *   await initializeDatabase();
- *
- *   // Create a campaign
- *   const campaign = await db.campaigns.create({ ... });
- *
- *   // Find by ID
- *   const found = await db.campaigns.findById(id);
- *
- *   // List with filters
- *   const active = await db.campaigns.findAll({ status: 'active' });
+ * If PostgreSQL is configured but unreachable, initialization fails rather
+ * than silently falling back to memory, which would lose data.
  */
 
-import { IDatabaseService } from "./types";
-import { MemoryDatabaseService, memoryDatabase } from "./memory-store";
-import { createPostgresDatabase, createPostgresPool, PostgresDatabaseService } from "./postgres-store";
+import { DomainStore } from "./types";
+import { MemoryStore } from "./memory-store";
+import { createPostgresStore } from "./postgres-store";
 
-/**
- * Database configuration
- */
 export interface DatabaseConfig {
   type: "memory" | "postgresql";
   connectionString?: string;
   pool?: {
-    min?: number;
     max?: number;
   };
 }
 
-// Module-level database instance
-let _db: IDatabaseService | null = null;
-let _config: DatabaseConfig | null = null;
-let _initialized = false;
+let store: DomainStore | null = null;
+/** True once initializeDatabase() or setStore() chose the store explicitly */
+let explicit = false;
 
 /**
- * Get database configuration from environment
+ * Open the configured store. Replaces the implicit in-memory store that
+ * getStore() creates when used before initialization.
  */
-function getConfigFromEnv(): DatabaseConfig {
-  const dbType = process.env.DATABASE_TYPE || "memory";
+export async function initializeDatabase(config: DatabaseConfig): Promise<DomainStore> {
+  if (store && explicit) {
+    return store;
+  }
 
-  if (dbType === "postgresql") {
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString) {
-      console.warn(
-        "DATABASE_URL not set, falling back to in-memory storage. " +
-          "WARNING: Data will be lost on restart!"
-      );
-      return { type: "memory" };
+  if (config.type === "postgresql") {
+    if (!config.connectionString) {
+      throw new Error("DATABASE_URL is required for PostgreSQL storage");
     }
-
-    return {
-      type: "postgresql",
-      connectionString,
-      pool: {
-        min: parseInt(process.env.DATABASE_POOL_MIN || "2", 10),
-        max: parseInt(process.env.DATABASE_POOL_MAX || "10", 10),
-      },
-    };
+    store = await createPostgresStore({
+      connectionString: config.connectionString,
+      max: config.pool?.max ?? 10,
+      idleTimeoutMillis: 30_000,
+      connectionTimeoutMillis: 5_000,
+    });
+  } else if (!store) {
+    store = new MemoryStore();
   }
 
-  if (process.env.NODE_ENV === "production" && dbType === "memory") {
-    console.warn(
-      "WARNING: Using in-memory storage in production! " +
-        "Set DATABASE_TYPE=postgresql and DATABASE_URL for persistent storage."
-    );
-  }
-
-  return { type: "memory" };
+  explicit = true;
+  return store;
 }
 
 /**
- * Initialize database connection
- * Call this once at application startup
+ * The active store. Falls back to a fresh in-memory store when nothing was
+ * initialized, which is what unit tests that mount routers directly rely on.
  */
-export async function initializeDatabase(config?: DatabaseConfig): Promise<IDatabaseService> {
-  if (_initialized && _db) {
-    return _db;
+export function getStore(): DomainStore {
+  if (!store) {
+    store = new MemoryStore();
   }
-
-  _config = config || getConfigFromEnv();
-
-  if (_config.type === "memory") {
-    console.log("Using in-memory database storage");
-    _db = memoryDatabase;
-    _initialized = true;
-    return _db;
-  }
-
-  if (_config.type === "postgresql") {
-    console.log("Connecting to PostgreSQL database...");
-    try {
-      const pool = await createPostgresPool({
-        connectionString: _config.connectionString,
-        min: _config.pool?.min || 2,
-        max: _config.pool?.max || 10,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 5000,
-      });
-
-      _db = createPostgresDatabase(pool);
-
-      // Verify connection
-      const connected = await _db.isConnected();
-      if (!connected) {
-        throw new Error("Failed to connect to PostgreSQL");
-      }
-
-      console.log("PostgreSQL database connected successfully");
-      _initialized = true;
-      return _db;
-    } catch (error) {
-      console.error("PostgreSQL connection failed:", error);
-      console.warn("Falling back to in-memory storage");
-      _db = memoryDatabase;
-      _config = { type: "memory" };
-      _initialized = true;
-      return _db;
-    }
-  }
-
-  // Fallback
-  console.warn("Unknown database type, using in-memory storage");
-  _db = memoryDatabase;
-  _initialized = true;
-  return _db;
+  return store;
 }
 
 /**
- * Get database instance
- * Will auto-initialize with default config if not already initialized
+ * Replace the active store (tests)
  */
-export function getDatabase(): IDatabaseService {
-  if (!_initialized || !_db) {
-    // Synchronous fallback for code that doesn't await initializeDatabase
-    console.warn(
-      "Database accessed before initialization. Using in-memory storage. " +
-        "Call initializeDatabase() at app startup for PostgreSQL support."
-    );
-    _db = memoryDatabase;
-    _config = { type: "memory" };
-    _initialized = true;
-  }
-  return _db;
+export function setStore(next: DomainStore): void {
+  store = next;
+  explicit = true;
 }
 
-/**
- * Database singleton (use getDatabase() for lazy access)
- * For backwards compatibility and simple usage
- */
-export const db: IDatabaseService = new Proxy({} as IDatabaseService, {
-  get(_target, prop) {
-    const database = getDatabase();
-    return (database as unknown as Record<string, unknown>)[prop as string];
-  },
-});
-
-/**
- * Get current database configuration
- */
-export function getDatabaseConfig(): DatabaseConfig {
-  return _config || { type: "memory" };
+export async function checkDatabaseHealth(): Promise<{ connected: boolean; type: string }> {
+  const active = getStore();
+  return { connected: await active.isConnected(), type: active.kind };
 }
 
-/**
- * Check if database is initialized
- */
-export function isDatabaseInitialized(): boolean {
-  return _initialized;
-}
-
-/**
- * Health check function
- */
-export async function checkDatabaseHealth(): Promise<{
-  connected: boolean;
-  type: string;
-  error?: string;
-}> {
-  try {
-    const database = getDatabase();
-    const connected = await database.isConnected();
-    return {
-      connected,
-      type: getDatabaseConfig().type,
-    };
-  } catch (error) {
-    return {
-      connected: false,
-      type: getDatabaseConfig().type,
-      error: error instanceof Error ? error.message : "Unknown error",
-    };
-  }
-}
-
-/**
- * Close database connection
- * Call this on application shutdown
- */
 export async function closeDatabase(): Promise<void> {
-  if (_db && _config?.type === "postgresql") {
-    await (_db as PostgresDatabaseService).close?.();
+  if (store) {
+    const closing = store;
+    store = null;
+    explicit = false;
+    await closing.close();
   }
-  _db = null;
-  _initialized = false;
 }
-
-// Re-export types for convenience
-export type { IDatabaseService } from "./types";
-export { MemoryDatabaseService } from "./memory-store";
-export { PostgresDatabaseService, createPostgresDatabase, createPostgresPool } from "./postgres-store";

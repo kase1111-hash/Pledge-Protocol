@@ -133,7 +133,15 @@ export interface ResolutionJob {
   processedAt?: number;
   result?: ResolutionResult;
   error?: string;
+  /** Set when resolution was refused because of the campaign's state */
+  errorCode?: ResolutionRefusalCode;
 }
+
+export type ResolutionRefusalCode =
+  | "campaign_not_found"
+  | "invalid_status"
+  | "pledge_window_open"
+  | "milestones_pending";
 
 export interface ResolutionResult {
   campaignId: string;

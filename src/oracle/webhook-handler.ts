@@ -44,7 +44,9 @@ export class WebhookHandler extends EventEmitter {
   async handleWebhook(
     oracleId: string,
     body: any,
-    headers: Record<string, string>
+    headers: Record<string, string>,
+    /** Exact request bytes; signatures are computed over these, not re-serialized JSON */
+    rawBody?: string
   ): Promise<{ success: boolean; message: string }> {
     const config = this.configs.get(oracleId);
 
@@ -54,7 +56,7 @@ export class WebhookHandler extends EventEmitter {
 
     // Verify signature
     const signature = headers[config.signatureHeader.toLowerCase()];
-    if (!this.verifySignature(body, signature, config)) {
+    if (!this.verifySignature(rawBody ?? body, signature, config)) {
       this.emit("webhook:invalid_signature", oracleId);
       return { success: false, message: "Invalid signature" };
     }
@@ -100,10 +102,10 @@ export class WebhookHandler extends EventEmitter {
     // Handle different signature formats
     const normalizedSignature = signature.replace(/^(sha256=|sha1=|sha512=)/, "");
 
-    return crypto.timingSafeEqual(
-      Buffer.from(normalizedSignature),
-      Buffer.from(expectedSignature)
-    );
+    const provided = Buffer.from(normalizedSignature);
+    const expected = Buffer.from(expectedSignature);
+    // timingSafeEqual throws on length mismatch
+    return provided.length === expected.length && crypto.timingSafeEqual(provided, expected);
   }
 
   /**

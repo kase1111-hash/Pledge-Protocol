@@ -27,6 +27,8 @@ export class DisputeService {
   private disputes: Map<string, Dispute> = new Map();
   private evidence: Map<string, DisputeEvidence[]> = new Map();
   private votes: Map<string, DisputeVote[]> = new Map();
+  /** Voting power per voter (lowercased address), fixed when voting opens */
+  private votingPowers: Map<string, Map<string, bigint>> = new Map();
   private events: Map<string, DisputeEvent[]> = new Map();
   private escalationRules: EscalationRules;
 
@@ -250,6 +252,10 @@ export class DisputeService {
     dispute.votingEndsAt = now + votingDurationMs;
     dispute.eligibleVoters = eligibleVoters;
     dispute.status = "voting";
+    this.votingPowers.set(
+      disputeId,
+      new Map(Array.from(votingPowers, ([address, power]) => [address.toLowerCase(), power]))
+    );
     dispute.updatedAt = now;
 
     // Initialize vote tally
@@ -283,6 +289,13 @@ export class DisputeService {
   /**
    * Cast a vote on a dispute
    */
+  /**
+   * The voting power assigned to a voter when voting opened (0 if none)
+   */
+  getVotingPower(disputeId: string, voter: string): bigint {
+    return this.votingPowers.get(disputeId)?.get(voter.toLowerCase()) ?? BigInt(0);
+  }
+
   async castVote(
     disputeId: string,
     voter: string,
@@ -305,13 +318,14 @@ export class DisputeService {
       throw new Error("Voting period has ended");
     }
 
-    if (!dispute.eligibleVoters.includes(voter)) {
+    const normalizedVoter = voter.toLowerCase();
+    if (!dispute.eligibleVoters.some((v) => v.toLowerCase() === normalizedVoter)) {
       throw new Error("Address not eligible to vote on this dispute");
     }
 
     // Check if already voted
     const existingVotes = this.votes.get(disputeId) || [];
-    if (existingVotes.some((v) => v.voter === voter)) {
+    if (existingVotes.some((v) => v.voter.toLowerCase() === normalizedVoter)) {
       throw new Error("Already voted on this dispute");
     }
 

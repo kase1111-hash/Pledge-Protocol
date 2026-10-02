@@ -5,7 +5,7 @@
 
 import { Router, Request, Response } from "express";
 import { z } from "zod";
-import { authService } from "../../security";
+import { authService, ROLE_PERMISSIONS } from "../../security";
 import { auditLogger } from "../../security/audit-logger";
 import { authMiddleware, requirePermission } from "../../security/middleware";
 
@@ -338,10 +338,10 @@ router.post(
       const { address } = req.params;
       const { role } = req.body;
 
-      if (!role) {
+      if (!role || !(role in ROLE_PERMISSIONS)) {
         res.status(400).json({
           success: false,
-          error: "Role is required",
+          error: `Role must be one of: ${Object.keys(ROLE_PERMISSIONS).join(", ")}`,
         });
         return;
       }

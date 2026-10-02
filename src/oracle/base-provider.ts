@@ -41,54 +41,14 @@ export abstract class BaseOracleProvider implements IOracleProvider {
    * Default condition verification logic
    */
   verifyCondition(data: any, condition: MilestoneCondition): boolean {
-    const fieldValue = this.extractField(data, condition.field);
-
-    switch (condition.operator) {
-      case "exists":
-        return fieldValue !== undefined && fieldValue !== null;
-
-      case "eq":
-        return fieldValue === condition.value;
-
-      case "gt":
-        return typeof fieldValue === "number" && fieldValue > condition.value;
-
-      case "gte":
-        return typeof fieldValue === "number" && fieldValue >= condition.value;
-
-      case "lt":
-        return typeof fieldValue === "number" && fieldValue < condition.value;
-
-      case "lte":
-        return typeof fieldValue === "number" && fieldValue <= condition.value;
-
-      case "between":
-        return (
-          typeof fieldValue === "number" &&
-          fieldValue >= condition.value &&
-          fieldValue <= condition.valueEnd
-        );
-
-      default:
-        return false;
-    }
+    return evaluateCondition(data, condition);
   }
 
   /**
    * Extract a field value using dot notation
    */
   protected extractField(data: any, fieldPath: string): any {
-    const parts = fieldPath.split(".");
-    let value = data;
-
-    for (const part of parts) {
-      if (value === undefined || value === null) {
-        return undefined;
-      }
-      value = value[part];
-    }
-
-    return value;
+    return extractField(data, fieldPath);
   }
 
   /**
@@ -139,5 +99,59 @@ export abstract class BaseOracleProvider implements IOracleProvider {
     } catch {
       return false;
     }
+  }
+}
+
+/**
+ * Extract a field value using dot notation
+ */
+export function extractField(data: any, fieldPath: string): any {
+  const parts = fieldPath.split(".");
+  let value = data;
+
+  for (const part of parts) {
+    if (value === undefined || value === null) {
+      return undefined;
+    }
+    value = value[part];
+  }
+
+  return value;
+}
+
+/**
+ * Evaluate a milestone condition against oracle data
+ */
+export function evaluateCondition(data: any, condition: MilestoneCondition): boolean {
+  const fieldValue = extractField(data, condition.field);
+
+  switch (condition.operator) {
+    case "exists":
+      return fieldValue !== undefined && fieldValue !== null;
+
+    case "eq":
+      return fieldValue === condition.value;
+
+    case "gt":
+      return typeof fieldValue === "number" && fieldValue > condition.value;
+
+    case "gte":
+      return typeof fieldValue === "number" && fieldValue >= condition.value;
+
+    case "lt":
+      return typeof fieldValue === "number" && fieldValue < condition.value;
+
+    case "lte":
+      return typeof fieldValue === "number" && fieldValue <= condition.value;
+
+    case "between":
+      return (
+        typeof fieldValue === "number" &&
+        fieldValue >= condition.value &&
+        fieldValue <= condition.valueEnd
+      );
+
+    default:
+      return false;
   }
 }

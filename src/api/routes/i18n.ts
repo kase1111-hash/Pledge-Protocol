@@ -6,6 +6,7 @@
 
 import { Router, Request, Response } from "express";
 import { translationService } from "../../i18n";
+import { authMiddleware, requireRole, sameAddress } from "../../security/middleware";
 
 const router = Router();
 
@@ -155,7 +156,7 @@ router.get("/bundles/:locale/:namespace", (req: Request, res: Response) => {
  * PUT /i18n/bundles/:locale/:namespace
  * Load/update translation bundle
  */
-router.put("/bundles/:locale/:namespace", (req: Request, res: Response) => {
+router.put("/bundles/:locale/:namespace", authMiddleware(), requireRole("admin"), (req: Request, res: Response) => {
   try {
     const bundle = {
       locale: req.params.locale as any,
@@ -321,8 +322,11 @@ router.get("/preferences/:address", (req: Request, res: Response) => {
  * PUT /i18n/preferences/:address
  * Update user locale preferences
  */
-router.put("/preferences/:address", (req: Request, res: Response) => {
+router.put("/preferences/:address", authMiddleware(), (req: Request, res: Response) => {
   try {
+    if (!sameAddress(req.params.address, req.auth!.address)) {
+      return res.status(403).json({ error: "You can only update your own preferences" });
+    }
     const updated = translationService.updateUserPreferences(
       req.params.address,
       req.body

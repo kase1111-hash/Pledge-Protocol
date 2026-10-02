@@ -1,180 +1,215 @@
 /**
- * Database Types
- * Type definitions for persistent storage entities
+ * Domain types and storage interface for the Pledge Protocol API.
+ *
+ * Amounts are wei, carried as non-negative integer strings so they never pass
+ * through floating point. Timestamps are unix seconds.
  */
 
-export interface CampaignEntity {
-  id: string;
-  chainId?: string;
-  creatorAddress: string;
-  beneficiaryAddress: string;
-  subjectName: string;
-  beneficiaryName: string;
-  category: string;
-  description?: string;
-  goalAmount?: string;
-  fundingDeadline?: number;
-  resolutionDeadline?: number;
-  status: "draft" | "active" | "pledges_closed" | "resolved" | "expired" | "cancelled";
-  totalPledged: string;
-  totalReleased: string;
-  totalRefunded: string;
-  createdAt: number;
-  activatedAt?: number;
-  resolvedAt?: number;
-  milestones?: MilestoneEntity[];
-  pledgeTypes?: PledgeTypeEntity[];
+export type CampaignStatus =
+  | "draft"
+  | "active"
+  | "pledging_closed"
+  | "resolved"
+  | "expired"
+  | "cancelled";
+
+export type CampaignVisibility = "public" | "semi-private" | "private";
+
+export type MilestoneStatus = "pending" | "verified" | "failed" | "expired";
+
+export type ConditionOperator = "exists" | "eq" | "gt" | "gte" | "lt" | "lte" | "between";
+
+export interface Subject {
+  name: string;
+  identifier: string;
+  verificationSource: string;
 }
 
-export interface PledgeEntity {
+export interface MilestoneCondition {
+  type: "completion" | "threshold" | "range" | "custom";
+  field: string;
+  operator: ConditionOperator;
+  value: string | number | boolean | null;
+  valueEnd?: number;
+}
+
+export interface Milestone {
   id: string;
-  chainId?: string;
+  name: string;
+  description: string;
+  oracleId: string;
+  /** Parameters passed to the oracle when verifying (e.g. race ID, bib number) */
+  oracleParams: Record<string, unknown>;
+  condition: MilestoneCondition;
+  releasePercentage: number;
+  status: MilestoneStatus;
+  verifiedAt: number | null;
+  oracleData: unknown;
+}
+
+export interface Tier {
+  threshold: number;
+  rate: string;
+}
+
+export interface PledgeCondition {
+  field: string;
+  operator: ConditionOperator;
+  value?: number;
+  valueEnd?: number;
+}
+
+export type CalculationType = "flat" | "per_unit" | "tiered" | "conditional";
+
+export interface PledgeType {
+  id: string;
+  name: string;
+  description: string;
+  calculationType: CalculationType;
+  baseAmount: string | null;
+  perUnitAmount: string | null;
+  unitField: string | null;
+  cap: string | null;
+  tiers: Tier[] | null;
+  condition: PledgeCondition | null;
+  minimum: string;
+  maximum: string | null;
+  enabled: boolean;
+}
+
+export interface Campaign {
+  id: string;
+  chainId: string | null;
+  name: string;
+  description: string;
+  creator: string;
+  beneficiary: string;
+  beneficiaryName: string;
+  subject: Subject | null;
+  pledgeWindowStart: number;
+  pledgeWindowEnd: number;
+  eventDate: number | null;
+  resolutionDeadline: number;
+  milestones: Milestone[];
+  pledgeTypes: PledgeType[];
+  minimumPledge: string;
+  maximumPledge: string | null;
+  status: CampaignStatus;
+  totalEscrowed: string;
+  totalReleased: string;
+  totalRefunded: string;
+  /** Number of pledges currently active (not cancelled) */
+  pledgeCount: number;
+  visibility: CampaignVisibility;
+  metadataUri: string;
+  createdAt: number;
+  updatedAt: number;
+  resolvedAt: number | null;
+}
+
+export type PledgeStatus = "active" | "resolved" | "refunded" | "cancelled";
+
+export interface Pledge {
+  id: string;
+  chainId: string | null;
   campaignId: string;
   pledgeTypeId: string;
-  backerAddress: string;
-  backerName?: string;
+  backer: string;
+  backerName: string | null;
   escrowedAmount: string;
-  finalAmount?: string;
-  status: "active" | "resolved" | "refunded" | "cancelled";
-  calculationParams?: Record<string, unknown>;
+  /** Amount released to the beneficiary on resolution */
+  finalAmount: string | null;
+  /** Amount returned to the backer on resolution or cancellation */
+  refundedAmount: string | null;
+  status: PledgeStatus;
   createdAt: number;
-  resolvedAt?: number;
+  resolvedAt: number | null;
+  tokenId: string | null;
+  commemorativeId: string | null;
 }
 
-export interface PledgeTypeEntity {
-  id: string;
-  campaignId: string;
-  name: string;
-  description?: string;
-  calculationType: "flat" | "per_unit" | "tiered" | "conditional";
-  minAmount?: string;
-  maxAmount?: string;
-  unitRate?: string;
-  maxUnits?: number;
-  createdAt: number;
-}
+export type OracleType = "api" | "attestation" | "aggregator";
+export type TrustLevel = "official" | "verified" | "community" | "custom";
 
-export interface MilestoneEntity {
-  id: string;
-  campaignId: string;
-  oracleId?: string;
-  name: string;
-  description?: string;
-  verificationType: string;
-  conditionConfig: Record<string, unknown>;
-  weight: number;
-  verified: boolean;
-  verifiedAt?: number;
-  oracleData?: Record<string, unknown>;
-  createdAt: number;
-}
-
-export interface OracleEntity {
+export interface Oracle {
   id: string;
   name: string;
-  description?: string;
-  oracleType: "attestation" | "api" | "aggregator";
-  trustLevel: "official" | "verified" | "community" | "custom";
+  description: string;
+  type: OracleType;
+  /** Address allowed to submit attestations (attestation oracles only) */
+  attestor: string | null;
+  endpoint: string | null;
+  trustLevel: TrustLevel;
   active: boolean;
-  endpoint?: string;
-  authConfig?: Record<string, unknown>;
-  queryMapping?: Record<string, unknown>;
-  responseMapping?: Record<string, unknown>;
-  pollInterval?: number;
+  config: Record<string, unknown> | null;
   createdAt: number;
 }
 
-export interface CommemorativeEntity {
+export interface Attestation {
   id: string;
-  pledgeId: string;
+  oracleId: string;
   campaignId: string;
-  backerAddress: string;
-  tokenId?: number;
-  templateType: "race_finish" | "academic" | "creative" | "generic";
-  metadata: Record<string, unknown>;
-  imageUri: string;
-  metadataUri: string;
-  storageProvider: "ipfs" | "arweave";
-  minted: boolean;
-  mintedAt?: number;
-  txHash?: string;
-  createdAt: number;
+  milestoneId: string;
+  completed: boolean;
+  value: number | null;
+  evidenceUri: string | null;
+  notes: string | null;
+  attestor: string;
+  signature: string;
+  submittedAt: number;
 }
 
-export interface ResolutionJobEntity {
-  id: string;
-  campaignId: string;
-  status: "pending" | "processing" | "completed" | "failed";
-  triggeredBy: "manual" | "webhook" | "poll" | "schedule";
-  milestonesVerified: number;
-  milestonesFailed: number;
-  pledgesResolved: number;
-  totalReleased: string;
-  totalRefunded: string;
-  commemorativesMinted: number;
-  errorMessage?: string;
-  startedAt?: number;
-  completedAt?: number;
-  createdAt: number;
+export interface Page<T> {
+  items: T[];
+  total: number;
 }
 
-/**
- * Query options for listing entities
- */
-export interface QueryOptions {
+export interface CampaignQuery {
+  status?: CampaignStatus;
+  visibility?: CampaignVisibility;
+  creator?: string;
   limit?: number;
   offset?: number;
-  orderBy?: string;
-  orderDir?: "asc" | "desc";
 }
 
-/**
- * Campaign filter options
- */
-export interface CampaignFilter extends QueryOptions {
-  status?: string | string[];
-  category?: string;
-  creatorAddress?: string;
-  beneficiaryAddress?: string;
-}
-
-/**
- * Pledge filter options
- */
-export interface PledgeFilter extends QueryOptions {
+export interface PledgeQuery {
   campaignId?: string;
-  backerAddress?: string;
-  status?: string | string[];
+  backer?: string;
+  status?: PledgeStatus;
+  limit?: number;
+  offset?: number;
 }
 
 /**
- * Repository interface for CRUD operations
+ * Read/write operations available both directly on the store and inside a
+ * transaction. Returned objects are copies: callers must save() changes.
  */
-export interface Repository<T, F = QueryOptions> {
-  findById(id: string): Promise<T | null>;
-  findAll(filter?: F): Promise<T[]>;
-  create(entity: Omit<T, "id" | "createdAt">): Promise<T>;
-  update(id: string, updates: Partial<T>): Promise<T | null>;
-  delete(id: string): Promise<boolean>;
-  count(filter?: F): Promise<number>;
+export interface StoreSession {
+  /**
+   * With forUpdate, the row is locked until the enclosing transaction ends, so
+   * concurrent read-modify-write cycles on the same campaign serialize.
+   */
+  getCampaign(id: string, options?: { forUpdate?: boolean }): Promise<Campaign | null>;
+  listCampaigns(query?: CampaignQuery): Promise<Page<Campaign>>;
+  saveCampaign(campaign: Campaign): Promise<void>;
+
+  getPledge(id: string, options?: { forUpdate?: boolean }): Promise<Pledge | null>;
+  listPledges(query?: PledgeQuery): Promise<Page<Pledge>>;
+  savePledge(pledge: Pledge): Promise<void>;
+
+  getOracle(id: string): Promise<Oracle | null>;
+  listOracles(): Promise<Oracle[]>;
+  saveOracle(oracle: Oracle): Promise<void>;
+
+  getAttestation(campaignId: string, milestoneId: string): Promise<Attestation | null>;
+  /** Inserts an attestation; returns false if one already exists for the milestone */
+  insertAttestation(attestation: Attestation): Promise<boolean>;
 }
 
-/**
- * Database service interface
- */
-export interface IDatabaseService {
-  campaigns: Repository<CampaignEntity, CampaignFilter>;
-  pledges: Repository<PledgeEntity, PledgeFilter>;
-  oracles: Repository<OracleEntity, QueryOptions>;
-  commemoratives: Repository<CommemorativeEntity, QueryOptions>;
-  resolutionJobs: Repository<ResolutionJobEntity, QueryOptions>;
-
-  // Health check
+export interface DomainStore extends StoreSession {
+  readonly kind: "memory" | "postgresql";
+  /** Runs fn atomically: all writes commit together or not at all */
+  transaction<T>(fn: (session: StoreSession) => Promise<T>): Promise<T>;
   isConnected(): Promise<boolean>;
-
-  // Transaction support (optional)
-  transaction?<T>(fn: () => Promise<T>): Promise<T>;
-
-  // Cleanup (for testing)
-  clear?(): Promise<void>;
+  close(): Promise<void>;
 }

@@ -138,6 +138,10 @@ npm run test:coverage
 
 # Run specific test file
 npx hardhat test test/CampaignRegistry.test.ts
+
+# Also run the API and store suites against PostgreSQL (drops and recreates
+# the store's tables in the given database)
+TEST_DATABASE_URL=postgres://user:password@localhost:5432/pledge_test npm run test:unit
 ```
 
 ### Writing Tests

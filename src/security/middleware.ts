@@ -5,7 +5,7 @@
 
 import { Request, Response, NextFunction } from "express";
 import { randomBytes } from "crypto";
-import { AuthContext, Permission, RateLimitTier, ValidationSchema } from "./types";
+import { AuthContext, Permission, RateLimitTier, UserRole, ValidationSchema } from "./types";
 import { authService } from "./auth-service";
 import { ipRateLimiter, userRateLimiter, RateLimitResult } from "./rate-limiter";
 import { logger, auditLogger } from "./audit-logger";
@@ -19,6 +19,8 @@ declare global {
       auth?: AuthContext;
       requestId?: string;
       startTime?: number;
+      /** Exact request bytes, kept for webhook signature verification */
+      rawBody?: Buffer;
     }
   }
 }
@@ -65,6 +67,24 @@ export function requestLoggerMiddleware(req: Request, res: Response, next: NextF
 }
 
 /**
+ * The session named by the X-Session-ID or Bearer header, if valid
+ */
+function sessionFromHeaders(req: Request): AuthContext | null {
+  const sessionHeader = req.headers["x-session-id"];
+  if (typeof sessionHeader === "string") {
+    const auth = authService.validateSession(sessionHeader);
+    if (auth) return auth;
+  }
+
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith("Bearer ")) {
+    return authService.validateSession(authHeader.slice(7));
+  }
+
+  return null;
+}
+
+/**
  * Authentication middleware
  * Validates session or API key from request headers
  */
@@ -73,27 +93,13 @@ export function authMiddleware(options?: {
   allowApiKey?: boolean;
 }): (req: Request, res: Response, next: NextFunction) => void {
   return (req: Request, res: Response, next: NextFunction) => {
-    const authHeader = req.headers.authorization;
     const apiKeyHeader = req.headers["x-api-key"] as string;
-    const sessionHeader = req.headers["x-session-id"] as string;
 
-    // Try session authentication
-    if (sessionHeader) {
-      const auth = authService.validateSession(sessionHeader);
-      if (auth) {
-        req.auth = auth;
-        return next();
-      }
-    }
-
-    // Try Bearer token (session ID)
-    if (authHeader?.startsWith("Bearer ")) {
-      const token = authHeader.slice(7);
-      const auth = authService.validateSession(token);
-      if (auth) {
-        req.auth = auth;
-        return next();
-      }
+    // Try session authentication (X-Session-ID or Bearer token)
+    const session = sessionFromHeaders(req);
+    if (session) {
+      req.auth = session;
+      return next();
     }
 
     // Try API key authentication
@@ -134,6 +140,40 @@ export function authMiddleware(options?: {
 
     next();
   };
+}
+
+/**
+ * Wrap an async route handler so a rejected promise reaches the error
+ * middleware (Express 4 only catches synchronous throws).
+ */
+export function asyncHandler(
+  handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>
+): (req: Request, res: Response, next: NextFunction) => void {
+  return (req, res, next) => {
+    handler(req, res, next).catch(next);
+  };
+}
+
+/**
+ * Case-insensitive comparison of Ethereum addresses
+ */
+export function sameAddress(a: string | null | undefined, b: string | null | undefined): boolean {
+  return !!a && !!b && a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * Whether the authenticated caller holds any of the given roles
+ */
+export function hasRole(req: Request, ...roles: UserRole[]): boolean {
+  return !!req.auth && roles.some((role) => req.auth!.roles.includes(role));
+}
+
+/**
+ * The exact body bytes a webhook provider signed. Falls back to re-serializing
+ * the parsed body when the app was mounted without raw body capture.
+ */
+export function rawBodyOf(req: Request): string {
+  return req.rawBody ? req.rawBody.toString("utf8") : JSON.stringify(req.body);
 }
 
 /**
@@ -180,7 +220,7 @@ export function requirePermission(
  * Checks if authenticated user has at least one of the required roles
  */
 export function requireRole(
-  ...roles: string[]
+  ...roles: UserRole[]
 ): (req: Request, res: Response, next: NextFunction) => void {
   return (req: Request, res: Response, next: NextFunction) => {
     if (!req.auth) {
@@ -192,9 +232,7 @@ export function requireRole(
       return;
     }
 
-    const hasRole = roles.some((role) => req.auth!.roles.includes(role as any));
-
-    if (!hasRole) {
+    if (!hasRole(req, ...roles)) {
       res.status(403).json({
         success: false,
         error: `Insufficient role. Required one of: ${roles.join(", ")}`,
@@ -219,10 +257,14 @@ export function rateLimitMiddleware(options?: {
     const ip = getClientIp(req);
     let result: RateLimitResult;
 
-    if (req.auth) {
+    // This runs before route-level authMiddleware, so look the session up here;
+    // otherwise signed-in users would be held to the anonymous IP limit
+    const address = req.auth?.address ?? sessionFromHeaders(req)?.address;
+
+    if (address) {
       // Use user-based rate limiting for authenticated requests
       const tier = options?.tier || "authenticated";
-      result = userRateLimiter.checkUser(req.auth.address, tier);
+      result = userRateLimiter.checkUser(address, tier);
     } else {
       // Use IP-based rate limiting for anonymous requests
       const tier = options?.tier || "anonymous";

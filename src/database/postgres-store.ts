@@ -1,386 +1,293 @@
 /**
- * PostgreSQL Database Adapter
- * Production implementation of the database service using PostgreSQL
+ * PostgreSQL store.
  *
- * Requires the `pg` package: npm install pg @types/pg
+ * Each entity is a JSONB document plus the scalar columns used for filtering
+ * and ordering. The schema is created (idempotently) by migrate(), which
+ * createPostgresStore() runs before returning.
  */
 
+import { Pool, PoolClient, PoolConfig } from "pg";
 import {
-  IDatabaseService,
-  Repository,
-  QueryOptions,
-  CampaignEntity,
-  CampaignFilter,
-  PledgeEntity,
-  PledgeFilter,
-  OracleEntity,
-  CommemorativeEntity,
-  ResolutionJobEntity,
+  Attestation,
+  Campaign,
+  CampaignQuery,
+  DomainStore,
+  Oracle,
+  Page,
+  Pledge,
+  PledgeQuery,
+  StoreSession,
 } from "./types";
 
 /**
- * PostgreSQL client type (from 'pg' package)
- * Using interface to avoid requiring pg at compile time
+ * Versioned migrations, applied in order. Never edit a released entry; append
+ * a new one instead.
  */
-interface PgPool {
-  query(text: string, values?: unknown[]): Promise<{ rows: unknown[]; rowCount: number }>;
-  connect(): Promise<PgClient>;
-  end(): Promise<void>;
+export const MIGRATIONS: { version: number; sql: string }[] = [
+  {
+    version: 1,
+    sql: `
+      CREATE TABLE campaign_records (
+        id          TEXT PRIMARY KEY,
+        creator     TEXT NOT NULL,
+        status      TEXT NOT NULL,
+        visibility  TEXT NOT NULL,
+        created_at  BIGINT NOT NULL,
+        data        JSONB NOT NULL
+      );
+      CREATE INDEX campaign_records_status_idx ON campaign_records (status);
+      CREATE INDEX campaign_records_creator_idx ON campaign_records (creator);
+      CREATE INDEX campaign_records_created_idx ON campaign_records (created_at DESC, id);
+
+      CREATE TABLE pledge_records (
+        id           TEXT PRIMARY KEY,
+        campaign_id  TEXT NOT NULL REFERENCES campaign_records (id),
+        backer       TEXT NOT NULL,
+        status       TEXT NOT NULL,
+        created_at   BIGINT NOT NULL,
+        data         JSONB NOT NULL
+      );
+      CREATE INDEX pledge_records_campaign_idx ON pledge_records (campaign_id);
+      CREATE INDEX pledge_records_backer_idx ON pledge_records (backer);
+      CREATE INDEX pledge_records_created_idx ON pledge_records (created_at DESC, id);
+
+      CREATE TABLE oracle_records (
+        id    TEXT PRIMARY KEY,
+        data  JSONB NOT NULL
+      );
+
+      CREATE TABLE attestation_records (
+        campaign_id   TEXT NOT NULL,
+        milestone_id  TEXT NOT NULL,
+        oracle_id     TEXT NOT NULL,
+        data          JSONB NOT NULL,
+        PRIMARY KEY (campaign_id, milestone_id)
+      );
+    `,
+  },
+];
+
+interface Queryable {
+  query(text: string, values?: unknown[]): Promise<{ rows: Record<string, unknown>[]; rowCount: number | null }>;
 }
 
-interface PgClient {
-  query(text: string, values?: unknown[]): Promise<{ rows: unknown[]; rowCount: number }>;
-  release(): void;
+function addFilter(where: string[], values: unknown[], column: string, value: unknown): void {
+  if (value === undefined) return;
+  values.push(value);
+  where.push(`${column} = $${values.length}`);
 }
 
-interface PgConfig {
-  connectionString?: string;
-  host?: string;
-  port?: number;
-  database?: string;
-  user?: string;
-  password?: string;
-  ssl?: boolean | { rejectUnauthorized: boolean };
-  max?: number;
-  min?: number;
-  idleTimeoutMillis?: number;
-  connectionTimeoutMillis?: number;
+function whereClause(where: string[]): string {
+  return where.length > 0 ? `WHERE ${where.join(" AND ")}` : "";
+}
+
+function pagination(values: unknown[], limit?: number, offset?: number): string {
+  let sql = "";
+  if (limit !== undefined) {
+    values.push(limit);
+    sql += ` LIMIT $${values.length}`;
+  }
+  if (offset) {
+    values.push(offset);
+    sql += ` OFFSET $${values.length}`;
+  }
+  return sql;
 }
 
 /**
- * Base PostgreSQL repository with common CRUD operations
+ * Queries bound to either the pool or a single transaction's client
  */
-class PgRepository<T extends { id: string; createdAt: number }, F extends QueryOptions = QueryOptions>
-  implements Repository<T, F>
-{
-  protected pool: PgPool;
-  protected tableName: string;
-  protected columns: string[];
+class PostgresSession implements StoreSession {
+  constructor(protected db: Queryable) {}
 
-  constructor(pool: PgPool, tableName: string, columns: string[]) {
-    this.pool = pool;
-    this.tableName = tableName;
-    this.columns = columns;
+  async getCampaign(id: string, options?: { forUpdate?: boolean }): Promise<Campaign | null> {
+    const lock = options?.forUpdate ? " FOR UPDATE" : "";
+    const result = await this.db.query(`SELECT data FROM campaign_records WHERE id = $1${lock}`, [id]);
+    return (result.rows[0]?.data as Campaign) ?? null;
   }
 
-  async findById(id: string): Promise<T | null> {
-    const result = await this.pool.query(
-      `SELECT * FROM ${this.tableName} WHERE id = $1`,
-      [id]
-    );
-    return result.rows.length > 0 ? this.mapRow(result.rows[0]) : null;
-  }
-
-  async findAll(filter?: F): Promise<T[]> {
-    const { whereClause, values } = this.buildWhereClause(filter);
-    const orderBy = this.buildOrderBy(filter);
-    const pagination = this.buildPagination(filter);
-
-    const query = `SELECT * FROM ${this.tableName} ${whereClause} ${orderBy} ${pagination}`;
-    const result = await this.pool.query(query, values);
-
-    return result.rows.map((row) => this.mapRow(row));
-  }
-
-  async create(entity: Omit<T, "id" | "createdAt">): Promise<T> {
-    const id = this.generateId();
-    const createdAt = Date.now();
-    const fullEntity = { ...entity, id, createdAt } as T;
-
-    const columns = Object.keys(fullEntity);
-    const values = Object.values(fullEntity);
-    const placeholders = columns.map((_, i) => `$${i + 1}`);
-
-    const query = `
-      INSERT INTO ${this.tableName} (${columns.map(this.toSnakeCase).join(", ")})
-      VALUES (${placeholders.join(", ")})
-      RETURNING *
-    `;
-
-    const result = await this.pool.query(query, values);
-    return this.mapRow(result.rows[0]);
-  }
-
-  async update(id: string, updates: Partial<T>): Promise<T | null> {
-    const entries = Object.entries(updates).filter(([key]) => key !== "id");
-    if (entries.length === 0) return this.findById(id);
-
-    const setClauses = entries.map(([key], i) => `${this.toSnakeCase(key)} = $${i + 2}`);
-    const values = [id, ...entries.map(([, value]) => value)];
-
-    const query = `
-      UPDATE ${this.tableName}
-      SET ${setClauses.join(", ")}
-      WHERE id = $1
-      RETURNING *
-    `;
-
-    const result = await this.pool.query(query, values);
-    return result.rows.length > 0 ? this.mapRow(result.rows[0]) : null;
-  }
-
-  async delete(id: string): Promise<boolean> {
-    const result = await this.pool.query(
-      `DELETE FROM ${this.tableName} WHERE id = $1`,
-      [id]
-    );
-    return result.rowCount > 0;
-  }
-
-  async count(filter?: F): Promise<number> {
-    const { whereClause, values } = this.buildWhereClause(filter);
-    const query = `SELECT COUNT(*) as count FROM ${this.tableName} ${whereClause}`;
-    const result = await this.pool.query(query, values);
-    return parseInt((result.rows[0] as { count: string }).count, 10);
-  }
-
-  protected buildWhereClause(_filter?: F): { whereClause: string; values: unknown[] } {
-    return { whereClause: "", values: [] };
-  }
-
-  protected buildOrderBy(filter?: F): string {
-    if (filter?.orderBy) {
-      const dir = filter.orderDir === "asc" ? "ASC" : "DESC";
-      return `ORDER BY ${this.toSnakeCase(filter.orderBy)} ${dir}`;
-    }
-    return "ORDER BY created_at DESC";
-  }
-
-  protected buildPagination(filter?: F): string {
-    const parts: string[] = [];
-    if (filter?.limit) parts.push(`LIMIT ${filter.limit}`);
-    if (filter?.offset) parts.push(`OFFSET ${filter.offset}`);
-    return parts.join(" ");
-  }
-
-  protected generateId(): string {
-    return `${this.tableName.slice(0, 4)}_${Date.now()}_${Math.random().toString(36).substring(2, 11)}`;
-  }
-
-  protected toSnakeCase(str: string): string {
-    return str.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
-  }
-
-  protected toCamelCase(str: string): string {
-    return str.replace(/_([a-z])/g, (_, letter) => letter.toUpperCase());
-  }
-
-  protected mapRow(row: unknown): T {
-    const obj = row as Record<string, unknown>;
-    const result: Record<string, unknown> = {};
-
-    for (const [key, value] of Object.entries(obj)) {
-      const camelKey = this.toCamelCase(key);
-
-      // Handle timestamps
-      if (key.endsWith("_at") && value instanceof Date) {
-        result[camelKey] = value.getTime();
-      }
-      // Handle BigInt/Numeric columns
-      else if (typeof value === "string" && /^\d+$/.test(value) && value.length > 15) {
-        result[camelKey] = value; // Keep as string for large numbers
-      }
-      // Handle JSON columns
-      else if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-        result[camelKey] = value;
-      }
-      else {
-        result[camelKey] = value;
-      }
-    }
-
-    return result as T;
-  }
-}
-
-/**
- * Campaign repository with PostgreSQL
- */
-class PgCampaignRepository extends PgRepository<CampaignEntity, CampaignFilter> {
-  constructor(pool: PgPool) {
-    super(pool, "campaigns", [
-      "id", "chain_id", "creator_address", "beneficiary_address",
-      "subject_name", "beneficiary_name", "category", "description",
-      "goal_amount", "funding_deadline", "resolution_deadline", "status",
-      "total_pledged", "total_released", "total_refunded",
-      "created_at", "activated_at", "resolved_at"
-    ]);
-  }
-
-  protected buildWhereClause(filter?: CampaignFilter): { whereClause: string; values: unknown[] } {
-    if (!filter) return { whereClause: "", values: [] };
-
-    const conditions: string[] = [];
+  async listCampaigns(query: CampaignQuery = {}): Promise<Page<Campaign>> {
+    const where: string[] = [];
     const values: unknown[] = [];
-    let paramIndex = 1;
+    addFilter(where, values, "status", query.status);
+    addFilter(where, values, "visibility", query.visibility);
+    addFilter(where, values, "creator", query.creator?.toLowerCase());
 
-    if (filter.status) {
-      const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
-      const placeholders = statuses.map(() => `$${paramIndex++}`);
-      conditions.push(`status IN (${placeholders.join(", ")})`);
-      values.push(...statuses);
-    }
-
-    if (filter.category) {
-      conditions.push(`category = $${paramIndex++}`);
-      values.push(filter.category);
-    }
-
-    if (filter.creatorAddress) {
-      conditions.push(`LOWER(creator_address) = LOWER($${paramIndex++})`);
-      values.push(filter.creatorAddress);
-    }
-
-    if (filter.beneficiaryAddress) {
-      conditions.push(`LOWER(beneficiary_address) = LOWER($${paramIndex++})`);
-      values.push(filter.beneficiaryAddress);
-    }
-
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    return { whereClause, values };
-  }
-}
-
-/**
- * Pledge repository with PostgreSQL
- */
-class PgPledgeRepository extends PgRepository<PledgeEntity, PledgeFilter> {
-  constructor(pool: PgPool) {
-    super(pool, "pledges", [
-      "id", "chain_id", "campaign_id", "pledge_type_id", "backer_address",
-      "backer_name", "escrowed_amount", "final_amount", "status",
-      "calculation_params", "created_at", "resolved_at"
-    ]);
+    const count = await this.db.query(
+      `SELECT COUNT(*)::int AS total FROM campaign_records ${whereClause(where)}`,
+      values
+    );
+    const pageValues = [...values];
+    const rows = await this.db.query(
+      `SELECT data FROM campaign_records ${whereClause(where)} ORDER BY created_at DESC, id` +
+        pagination(pageValues, query.limit, query.offset),
+      pageValues
+    );
+    return {
+      items: rows.rows.map((r) => r.data as Campaign),
+      total: count.rows[0].total as number,
+    };
   }
 
-  protected buildWhereClause(filter?: PledgeFilter): { whereClause: string; values: unknown[] } {
-    if (!filter) return { whereClause: "", values: [] };
+  async saveCampaign(campaign: Campaign): Promise<void> {
+    await this.db.query(
+      `INSERT INTO campaign_records (id, creator, status, visibility, created_at, data)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO UPDATE SET
+         creator = EXCLUDED.creator,
+         status = EXCLUDED.status,
+         visibility = EXCLUDED.visibility,
+         data = EXCLUDED.data`,
+      [
+        campaign.id,
+        campaign.creator.toLowerCase(),
+        campaign.status,
+        campaign.visibility,
+        campaign.createdAt,
+        JSON.stringify(campaign),
+      ]
+    );
+  }
 
-    const conditions: string[] = [];
+  async getPledge(id: string, options?: { forUpdate?: boolean }): Promise<Pledge | null> {
+    const lock = options?.forUpdate ? " FOR UPDATE" : "";
+    const result = await this.db.query(`SELECT data FROM pledge_records WHERE id = $1${lock}`, [id]);
+    return (result.rows[0]?.data as Pledge) ?? null;
+  }
+
+  async listPledges(query: PledgeQuery = {}): Promise<Page<Pledge>> {
+    const where: string[] = [];
     const values: unknown[] = [];
-    let paramIndex = 1;
+    addFilter(where, values, "campaign_id", query.campaignId);
+    addFilter(where, values, "backer", query.backer?.toLowerCase());
+    addFilter(where, values, "status", query.status);
 
-    if (filter.campaignId) {
-      conditions.push(`campaign_id = $${paramIndex++}`);
-      values.push(filter.campaignId);
+    const count = await this.db.query(
+      `SELECT COUNT(*)::int AS total FROM pledge_records ${whereClause(where)}`,
+      values
+    );
+    const pageValues = [...values];
+    const rows = await this.db.query(
+      `SELECT data FROM pledge_records ${whereClause(where)} ORDER BY created_at DESC, id` +
+        pagination(pageValues, query.limit, query.offset),
+      pageValues
+    );
+    return {
+      items: rows.rows.map((r) => r.data as Pledge),
+      total: count.rows[0].total as number,
+    };
+  }
+
+  async savePledge(pledge: Pledge): Promise<void> {
+    await this.db.query(
+      `INSERT INTO pledge_records (id, campaign_id, backer, status, created_at, data)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT (id) DO UPDATE SET
+         status = EXCLUDED.status,
+         data = EXCLUDED.data`,
+      [
+        pledge.id,
+        pledge.campaignId,
+        pledge.backer.toLowerCase(),
+        pledge.status,
+        pledge.createdAt,
+        JSON.stringify(pledge),
+      ]
+    );
+  }
+
+  async getOracle(id: string): Promise<Oracle | null> {
+    const result = await this.db.query(`SELECT data FROM oracle_records WHERE id = $1`, [id]);
+    return (result.rows[0]?.data as Oracle) ?? null;
+  }
+
+  async listOracles(): Promise<Oracle[]> {
+    const result = await this.db.query(`SELECT data FROM oracle_records ORDER BY id`);
+    return result.rows.map((r) => r.data as Oracle);
+  }
+
+  async saveOracle(oracle: Oracle): Promise<void> {
+    await this.db.query(
+      `INSERT INTO oracle_records (id, data) VALUES ($1, $2)
+       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data`,
+      [oracle.id, JSON.stringify(oracle)]
+    );
+  }
+
+  async getAttestation(campaignId: string, milestoneId: string): Promise<Attestation | null> {
+    const result = await this.db.query(
+      `SELECT data FROM attestation_records WHERE campaign_id = $1 AND milestone_id = $2`,
+      [campaignId, milestoneId]
+    );
+    return (result.rows[0]?.data as Attestation) ?? null;
+  }
+
+  async insertAttestation(attestation: Attestation): Promise<boolean> {
+    const result = await this.db.query(
+      `INSERT INTO attestation_records (campaign_id, milestone_id, oracle_id, data)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (campaign_id, milestone_id) DO NOTHING`,
+      [attestation.campaignId, attestation.milestoneId, attestation.oracleId, JSON.stringify(attestation)]
+    );
+    return result.rowCount === 1;
+  }
+}
+
+export class PostgresStore extends PostgresSession implements DomainStore {
+  readonly kind = "postgresql" as const;
+
+  constructor(private pool: Pool) {
+    super(pool as unknown as Queryable);
+  }
+
+  async transaction<T>(fn: (session: StoreSession) => Promise<T>): Promise<T> {
+    const client: PoolClient = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await fn(new PostgresSession(client as unknown as Queryable));
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
     }
+  }
 
-    if (filter.backerAddress) {
-      conditions.push(`LOWER(backer_address) = LOWER($${paramIndex++})`);
-      values.push(filter.backerAddress);
+  /**
+   * Apply any migrations not yet recorded in schema_migrations. A session-level
+   * advisory lock keeps concurrently starting instances from racing.
+   */
+  async migrate(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("SELECT pg_advisory_lock(727001)");
+      await client.query(
+        `CREATE TABLE IF NOT EXISTS schema_migrations (
+           version     INTEGER PRIMARY KEY,
+           applied_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+         )`
+      );
+      const applied = await client.query("SELECT version FROM schema_migrations");
+      const done = new Set(applied.rows.map((r) => r.version as number));
+
+      for (const migration of MIGRATIONS) {
+        if (done.has(migration.version)) continue;
+        await client.query("BEGIN");
+        try {
+          await client.query(migration.sql);
+          await client.query("INSERT INTO schema_migrations (version) VALUES ($1)", [migration.version]);
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          throw error;
+        }
+      }
+    } finally {
+      await client.query("SELECT pg_advisory_unlock(727001)").catch(() => undefined);
+      client.release();
     }
-
-    if (filter.status) {
-      const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
-      const placeholders = statuses.map(() => `$${paramIndex++}`);
-      conditions.push(`status IN (${placeholders.join(", ")})`);
-      values.push(...statuses);
-    }
-
-    const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(" AND ")}` : "";
-    return { whereClause, values };
-  }
-
-  async findByBacker(backerAddress: string): Promise<PledgeEntity[]> {
-    return this.findAll({ backerAddress });
-  }
-
-  async findByCampaign(campaignId: string): Promise<PledgeEntity[]> {
-    return this.findAll({ campaignId });
-  }
-}
-
-/**
- * Oracle repository with PostgreSQL
- */
-class PgOracleRepository extends PgRepository<OracleEntity> {
-  constructor(pool: PgPool) {
-    super(pool, "oracles", [
-      "id", "name", "description", "oracle_type", "trust_level",
-      "active", "endpoint", "auth_config", "query_mapping",
-      "response_mapping", "poll_interval", "created_at"
-    ]);
-  }
-}
-
-/**
- * Commemorative repository with PostgreSQL
- */
-class PgCommemorativeRepository extends PgRepository<CommemorativeEntity> {
-  constructor(pool: PgPool) {
-    super(pool, "commemoratives", [
-      "id", "pledge_id", "campaign_id", "backer_address", "token_id",
-      "template_type", "metadata", "image_uri", "metadata_uri",
-      "storage_provider", "minted", "minted_at", "tx_hash", "created_at"
-    ]);
-  }
-
-  async findByPledgeId(pledgeId: string): Promise<CommemorativeEntity | null> {
-    const result = await this.pool.query(
-      `SELECT * FROM ${this.tableName} WHERE pledge_id = $1`,
-      [pledgeId]
-    );
-    return result.rows.length > 0 ? this.mapRow(result.rows[0]) : null;
-  }
-
-  async findByCampaignId(campaignId: string): Promise<CommemorativeEntity[]> {
-    const result = await this.pool.query(
-      `SELECT * FROM ${this.tableName} WHERE campaign_id = $1 ORDER BY created_at DESC`,
-      [campaignId]
-    );
-    return result.rows.map((row) => this.mapRow(row));
-  }
-
-  async findByBackerAddress(address: string): Promise<CommemorativeEntity[]> {
-    const result = await this.pool.query(
-      `SELECT * FROM ${this.tableName} WHERE LOWER(backer_address) = LOWER($1) ORDER BY created_at DESC`,
-      [address]
-    );
-    return result.rows.map((row) => this.mapRow(row));
-  }
-}
-
-/**
- * Resolution job repository with PostgreSQL
- */
-class PgResolutionJobRepository extends PgRepository<ResolutionJobEntity> {
-  constructor(pool: PgPool) {
-    super(pool, "resolution_jobs", [
-      "id", "campaign_id", "status", "triggered_by",
-      "milestones_verified", "milestones_failed", "pledges_resolved",
-      "total_released", "total_refunded", "commemoratives_minted",
-      "error_message", "started_at", "completed_at", "created_at"
-    ]);
-  }
-
-  async findByCampaignId(campaignId: string): Promise<ResolutionJobEntity[]> {
-    const result = await this.pool.query(
-      `SELECT * FROM ${this.tableName} WHERE campaign_id = $1 ORDER BY created_at DESC`,
-      [campaignId]
-    );
-    return result.rows.map((row) => this.mapRow(row));
-  }
-}
-
-/**
- * PostgreSQL database service implementation
- */
-export class PostgresDatabaseService implements IDatabaseService {
-  private pool: PgPool;
-
-  campaigns: PgCampaignRepository;
-  pledges: PgPledgeRepository;
-  oracles: PgOracleRepository;
-  commemoratives: PgCommemorativeRepository;
-  resolutionJobs: PgResolutionJobRepository;
-
-  constructor(pool: PgPool) {
-    this.pool = pool;
-    this.campaigns = new PgCampaignRepository(pool);
-    this.pledges = new PgPledgeRepository(pool);
-    this.oracles = new PgOracleRepository(pool);
-    this.commemoratives = new PgCommemorativeRepository(pool);
-    this.resolutionJobs = new PgResolutionJobRepository(pool);
   }
 
   async isConnected(): Promise<boolean> {
@@ -392,59 +299,22 @@ export class PostgresDatabaseService implements IDatabaseService {
     }
   }
 
-  async transaction<T>(fn: () => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
-    try {
-      await client.query("BEGIN");
-      const result = await fn();
-      await client.query("COMMIT");
-      return result;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
-  async clear(): Promise<void> {
-    // Only for testing - clear all tables
-    await this.pool.query("TRUNCATE campaigns, pledges, oracles, commemoratives, resolution_jobs CASCADE");
-  }
-
   async close(): Promise<void> {
     await this.pool.end();
   }
 }
 
 /**
- * Create PostgreSQL database service
- *
- * Usage:
- *   import { Pool } from 'pg';
- *   import { createPostgresDatabase } from './postgres-store';
- *
- *   const pool = new Pool({ connectionString: process.env.DATABASE_URL });
- *   const db = createPostgresDatabase(pool);
+ * Connect, verify the connection, and bring the schema up to date
  */
-export function createPostgresDatabase(pool: PgPool): PostgresDatabaseService {
-  return new PostgresDatabaseService(pool);
-}
-
-/**
- * Create PostgreSQL pool from config
- *
- * Note: Requires 'pg' package to be installed
- * This function is a factory that dynamically imports 'pg'
- */
-export async function createPostgresPool(config: PgConfig): Promise<PgPool> {
+export async function createPostgresStore(config: PoolConfig): Promise<PostgresStore> {
+  const pool = new Pool(config);
+  const store = new PostgresStore(pool);
   try {
-    // Dynamic import to avoid requiring pg at compile time
-    const { Pool } = await import("pg");
-    return new Pool(config);
+    await store.migrate();
   } catch (error) {
-    throw new Error(
-      "PostgreSQL support requires the 'pg' package. Install it with: npm install pg"
-    );
+    await pool.end().catch(() => undefined);
+    throw error;
   }
+  return store;
 }

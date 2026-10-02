@@ -80,7 +80,8 @@ export class NotificationService {
     let webhooks = Array.from(this.webhooks.values());
 
     if (createdBy) {
-      webhooks = webhooks.filter((w) => w.createdBy === createdBy);
+      const owner = createdBy.toLowerCase();
+      webhooks = webhooks.filter((w) => w.createdBy.toLowerCase() === owner);
     }
 
     return webhooks.sort((a, b) => b.createdAt - a.createdAt);

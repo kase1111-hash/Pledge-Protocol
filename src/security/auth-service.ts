@@ -18,6 +18,20 @@ import {
 } from "./types";
 
 /**
+ * Addresses granted the admin role via ADMIN_ADDRESSES (comma-separated).
+ * This is how the first administrator is bootstrapped: role assignment over
+ * the API itself requires an admin.
+ */
+function configuredAdmins(): Set<string> {
+  return new Set(
+    (process.env.ADMIN_ADDRESSES || "")
+      .split(",")
+      .map((a) => a.trim().toLowerCase())
+      .filter((a) => a.length > 0)
+  );
+}
+
+/**
  * Authentication Service
  * Handles wallet-based authentication, session management, and API keys
  */
@@ -333,7 +347,10 @@ export class AuthService {
    */
   getUserRoles(address: string): UserRole[] {
     const normalizedAddress = address.toLowerCase();
-    const roles = this.userRoles.get(normalizedAddress) || ["backer"];
+    const roles = [...(this.userRoles.get(normalizedAddress) || ["backer"])];
+    if (configuredAdmins().has(normalizedAddress) && !roles.includes("admin")) {
+      roles.push("admin");
+    }
     return roles;
   }
 
@@ -342,7 +359,8 @@ export class AuthService {
    */
   assignRole(address: string, role: UserRole): void {
     const normalizedAddress = address.toLowerCase();
-    const roles = this.userRoles.get(normalizedAddress) || [];
+    // Start from the default so assigning a role does not drop "backer"
+    const roles = this.userRoles.get(normalizedAddress) || ["backer"];
 
     if (!roles.includes(role)) {
       roles.push(role);

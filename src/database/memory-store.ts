@@ -1,297 +1,216 @@
 /**
- * In-Memory Store
- * Development/testing implementation of the database service
+ * In-memory store for development and tests.
  *
- * WARNING: Data is lost on server restart. Use PostgreSQL for production.
+ * Behaves like the PostgreSQL store: objects are copied on the way in and out
+ * (so forgetting to save() a change loses it here too), writes are
+ * serialized, and a failed transaction leaves no trace. Data is lost when the
+ * process exits.
  */
 
-import { v4 as uuidv4 } from "uuid";
 import {
-  IDatabaseService,
-  Repository,
-  QueryOptions,
-  CampaignEntity,
-  CampaignFilter,
-  PledgeEntity,
-  PledgeFilter,
-  OracleEntity,
-  CommemorativeEntity,
-  ResolutionJobEntity,
+  Attestation,
+  Campaign,
+  CampaignQuery,
+  DomainStore,
+  Oracle,
+  Page,
+  Pledge,
+  PledgeQuery,
+  StoreSession,
 } from "./types";
 
+function copy<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function page<T>(items: T[], limit?: number, offset = 0): Page<T> {
+  return {
+    items: limit === undefined ? items.slice(offset) : items.slice(offset, offset + limit),
+    total: items.length,
+  };
+}
+
+/** Newest first, with id as a tiebreaker so paging is stable */
+function byNewest<T extends { createdAt: number; id: string }>(a: T, b: T): number {
+  return b.createdAt - a.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+}
+
+interface Tables {
+  campaigns: Map<string, Campaign>;
+  pledges: Map<string, Pledge>;
+  oracles: Map<string, Oracle>;
+  attestations: Map<string, Attestation>;
+}
+
+function emptyTables(): Tables {
+  return {
+    campaigns: new Map(),
+    pledges: new Map(),
+    oracles: new Map(),
+    attestations: new Map(),
+  };
+}
+
 /**
- * Generic in-memory repository implementation
+ * Reads and writes against one set of tables: the committed tables for plain
+ * reads, or a transaction's private working copy
  */
-class MemoryRepository<T extends { id: string; createdAt: number }, F extends QueryOptions = QueryOptions>
-  implements Repository<T, F>
-{
-  protected store: Map<string, T> = new Map();
-  protected idPrefix: string;
+class MemorySession implements StoreSession {
+  constructor(private tables: Tables) {}
 
-  constructor(idPrefix: string = "") {
-    this.idPrefix = idPrefix;
+  async getCampaign(id: string): Promise<Campaign | null> {
+    const campaign = this.tables.campaigns.get(id);
+    return campaign ? copy(campaign) : null;
   }
 
-  async findById(id: string): Promise<T | null> {
-    return this.store.get(id) || null;
+  async listCampaigns(query: CampaignQuery = {}): Promise<Page<Campaign>> {
+    const creator = query.creator?.toLowerCase();
+    const matches = Array.from(this.tables.campaigns.values())
+      .filter((c) => !query.status || c.status === query.status)
+      .filter((c) => !query.visibility || c.visibility === query.visibility)
+      .filter((c) => !creator || c.creator.toLowerCase() === creator)
+      .sort(byNewest);
+    return copy(page(matches, query.limit, query.offset));
   }
 
-  async findAll(filter?: F): Promise<T[]> {
-    let results = Array.from(this.store.values());
+  async saveCampaign(campaign: Campaign): Promise<void> {
+    this.tables.campaigns.set(campaign.id, copy(campaign));
+  }
 
-    // Apply filtering (override in subclasses)
-    results = this.applyFilter(results, filter);
+  async getPledge(id: string): Promise<Pledge | null> {
+    const pledge = this.tables.pledges.get(id);
+    return pledge ? copy(pledge) : null;
+  }
 
-    // Apply ordering
-    if (filter?.orderBy) {
-      const dir = filter.orderDir === "desc" ? -1 : 1;
-      results.sort((a, b) => {
-        const aVal = (a as Record<string, unknown>)[filter.orderBy!] as
-          | string
-          | number
-          | undefined;
-        const bVal = (b as Record<string, unknown>)[filter.orderBy!] as
-          | string
-          | number
-          | undefined;
-        if (aVal === bVal) return 0;
-        if (aVal === undefined) return 1;
-        if (bVal === undefined) return -1;
-        if (aVal < bVal) return -1 * dir;
-        if (aVal > bVal) return 1 * dir;
-        return 0;
-      });
-    } else {
-      // Default: order by createdAt desc
-      results.sort((a, b) => b.createdAt - a.createdAt);
+  async listPledges(query: PledgeQuery = {}): Promise<Page<Pledge>> {
+    const backer = query.backer?.toLowerCase();
+    const matches = Array.from(this.tables.pledges.values())
+      .filter((p) => !query.campaignId || p.campaignId === query.campaignId)
+      .filter((p) => !backer || p.backer.toLowerCase() === backer)
+      .filter((p) => !query.status || p.status === query.status)
+      .sort(byNewest);
+    return copy(page(matches, query.limit, query.offset));
+  }
+
+  async savePledge(pledge: Pledge): Promise<void> {
+    this.tables.pledges.set(pledge.id, copy(pledge));
+  }
+
+  async getOracle(id: string): Promise<Oracle | null> {
+    const oracle = this.tables.oracles.get(id);
+    return oracle ? copy(oracle) : null;
+  }
+
+  async listOracles(): Promise<Oracle[]> {
+    return copy(
+      Array.from(this.tables.oracles.values()).sort((a, b) => (a.id < b.id ? -1 : 1))
+    );
+  }
+
+  async saveOracle(oracle: Oracle): Promise<void> {
+    this.tables.oracles.set(oracle.id, copy(oracle));
+  }
+
+  async getAttestation(campaignId: string, milestoneId: string): Promise<Attestation | null> {
+    const attestation = this.tables.attestations.get(`${campaignId}:${milestoneId}`);
+    return attestation ? copy(attestation) : null;
+  }
+
+  async insertAttestation(attestation: Attestation): Promise<boolean> {
+    const key = `${attestation.campaignId}:${attestation.milestoneId}`;
+    if (this.tables.attestations.has(key)) {
+      return false;
     }
-
-    // Apply pagination
-    const offset = filter?.offset || 0;
-    const limit = filter?.limit || results.length;
-    return results.slice(offset, offset + limit);
-  }
-
-  async create(entity: Omit<T, "id" | "createdAt">): Promise<T> {
-    const id = this.idPrefix ? `${this.idPrefix}_${uuidv4()}` : uuidv4();
-    const newEntity = {
-      ...entity,
-      id,
-      createdAt: Date.now(),
-    } as T;
-    this.store.set(id, newEntity);
-    return newEntity;
-  }
-
-  async update(id: string, updates: Partial<T>): Promise<T | null> {
-    const existing = this.store.get(id);
-    if (!existing) return null;
-
-    const updated = { ...existing, ...updates, id }; // Prevent id change
-    this.store.set(id, updated);
-    return updated;
-  }
-
-  async delete(id: string): Promise<boolean> {
-    return this.store.delete(id);
-  }
-
-  async count(filter?: F): Promise<number> {
-    const results = this.applyFilter(Array.from(this.store.values()), filter);
-    return results.length;
-  }
-
-  protected applyFilter(results: T[], _filter?: F): T[] {
-    return results;
-  }
-
-  // For testing
-  clear(): void {
-    this.store.clear();
+    this.tables.attestations.set(key, copy(attestation));
+    return true;
   }
 }
 
-/**
- * Campaign repository with campaign-specific filtering
- */
-class CampaignRepository extends MemoryRepository<CampaignEntity, CampaignFilter> {
-  constructor() {
-    super("campaign");
+export class MemoryStore implements DomainStore {
+  readonly kind = "memory" as const;
+
+  /** Committed data. Replaced wholesale when a transaction commits. */
+  private tables: Tables = emptyTables();
+
+  /** Tail of the write queue; each transaction waits for the previous one */
+  private queue: Promise<unknown> = Promise.resolve();
+
+  private committed(): MemorySession {
+    return new MemorySession(this.tables);
   }
 
-  protected applyFilter(results: CampaignEntity[], filter?: CampaignFilter): CampaignEntity[] {
-    if (!filter) return results;
-
-    return results.filter((c) => {
-      if (filter.status) {
-        const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
-        if (!statuses.includes(c.status)) return false;
-      }
-      if (filter.category && c.category !== filter.category) return false;
-      if (filter.creatorAddress && c.creatorAddress.toLowerCase() !== filter.creatorAddress.toLowerCase())
-        return false;
-      if (
-        filter.beneficiaryAddress &&
-        c.beneficiaryAddress.toLowerCase() !== filter.beneficiaryAddress.toLowerCase()
-      )
-        return false;
-      return true;
-    });
-  }
-}
-
-/**
- * Pledge repository with pledge-specific filtering
- */
-class PledgeRepository extends MemoryRepository<PledgeEntity, PledgeFilter> {
-  constructor() {
-    super("pledge");
+  getCampaign(id: string) {
+    return this.committed().getCampaign(id);
   }
 
-  protected applyFilter(results: PledgeEntity[], filter?: PledgeFilter): PledgeEntity[] {
-    if (!filter) return results;
-
-    return results.filter((p) => {
-      if (filter.campaignId && p.campaignId !== filter.campaignId) return false;
-      if (filter.backerAddress && p.backerAddress.toLowerCase() !== filter.backerAddress.toLowerCase())
-        return false;
-      if (filter.status) {
-        const statuses = Array.isArray(filter.status) ? filter.status : [filter.status];
-        if (!statuses.includes(p.status)) return false;
-      }
-      return true;
-    });
+  listCampaigns(query?: CampaignQuery) {
+    return this.committed().listCampaigns(query);
   }
 
-  async findByBacker(backerAddress: string): Promise<PledgeEntity[]> {
-    return this.findAll({ backerAddress });
+  saveCampaign(campaign: Campaign) {
+    return this.transaction((tx) => tx.saveCampaign(campaign));
   }
 
-  async findByCampaign(campaignId: string): Promise<PledgeEntity[]> {
-    return this.findAll({ campaignId });
-  }
-}
-
-/**
- * Oracle repository
- */
-class OracleRepository extends MemoryRepository<OracleEntity> {
-  constructor() {
-    super("oracle");
+  getPledge(id: string) {
+    return this.committed().getPledge(id);
   }
 
-  protected applyFilter(results: OracleEntity[], filter?: QueryOptions): OracleEntity[] {
-    // Add oracle-specific filtering if needed
-    return results;
-  }
-}
-
-/**
- * Commemorative repository
- */
-class CommemorativeRepository extends MemoryRepository<CommemorativeEntity> {
-  private pledgeIndex: Map<string, string> = new Map();
-  private campaignIndex: Map<string, string[]> = new Map();
-  private backerIndex: Map<string, string[]> = new Map();
-
-  constructor() {
-    super("comm");
+  listPledges(query?: PledgeQuery) {
+    return this.committed().listPledges(query);
   }
 
-  async create(entity: Omit<CommemorativeEntity, "id" | "createdAt">): Promise<CommemorativeEntity> {
-    const created = await super.create(entity);
-
-    // Update indexes
-    this.pledgeIndex.set(entity.pledgeId, created.id);
-
-    const campaignComms = this.campaignIndex.get(entity.campaignId) || [];
-    campaignComms.push(created.id);
-    this.campaignIndex.set(entity.campaignId, campaignComms);
-
-    const backerComms = this.backerIndex.get(entity.backerAddress.toLowerCase()) || [];
-    backerComms.push(created.id);
-    this.backerIndex.set(entity.backerAddress.toLowerCase(), backerComms);
-
-    return created;
+  savePledge(pledge: Pledge) {
+    return this.transaction((tx) => tx.savePledge(pledge));
   }
 
-  async findByPledgeId(pledgeId: string): Promise<CommemorativeEntity | null> {
-    const id = this.pledgeIndex.get(pledgeId);
-    return id ? this.findById(id) : null;
+  getOracle(id: string) {
+    return this.committed().getOracle(id);
   }
 
-  async findByCampaignId(campaignId: string): Promise<CommemorativeEntity[]> {
-    const ids = this.campaignIndex.get(campaignId) || [];
-    const results: CommemorativeEntity[] = [];
-    for (const id of ids) {
-      const entity = await this.findById(id);
-      if (entity) results.push(entity);
-    }
-    return results;
+  listOracles() {
+    return this.committed().listOracles();
   }
 
-  async findByBackerAddress(address: string): Promise<CommemorativeEntity[]> {
-    const ids = this.backerIndex.get(address.toLowerCase()) || [];
-    const results: CommemorativeEntity[] = [];
-    for (const id of ids) {
-      const entity = await this.findById(id);
-      if (entity) results.push(entity);
-    }
-    return results;
+  saveOracle(oracle: Oracle) {
+    return this.transaction((tx) => tx.saveOracle(oracle));
   }
 
-  clear(): void {
-    super.clear();
-    this.pledgeIndex.clear();
-    this.campaignIndex.clear();
-    this.backerIndex.clear();
-  }
-}
-
-/**
- * Resolution job repository
- */
-class ResolutionJobRepository extends MemoryRepository<ResolutionJobEntity> {
-  constructor() {
-    super("res");
+  getAttestation(campaignId: string, milestoneId: string) {
+    return this.committed().getAttestation(campaignId, milestoneId);
   }
 
-  async findByCampaignId(campaignId: string): Promise<ResolutionJobEntity[]> {
-    const all = await this.findAll();
-    return all.filter((j) => j.campaignId === campaignId);
+  insertAttestation(attestation: Attestation) {
+    return this.transaction((tx) => tx.insertAttestation(attestation));
   }
-}
 
-/**
- * In-memory database service implementation
- */
-export class MemoryDatabaseService implements IDatabaseService {
-  campaigns: CampaignRepository;
-  pledges: PledgeRepository;
-  oracles: OracleRepository;
-  commemoratives: CommemorativeRepository;
-  resolutionJobs: ResolutionJobRepository;
+  /**
+   * Transactions run one at a time against a private copy of the data, which
+   * becomes the committed data only if fn succeeds. Plain reads never see
+   * uncommitted writes.
+   */
+  async transaction<T>(fn: (session: StoreSession) => Promise<T>): Promise<T> {
+    const run = async (): Promise<T> => {
+      const working = copy(this.tables);
+      const result = await fn(new MemorySession(working));
+      this.tables = working;
+      return result;
+    };
 
-  constructor() {
-    this.campaigns = new CampaignRepository();
-    this.pledges = new PledgeRepository();
-    this.oracles = new OracleRepository();
-    this.commemoratives = new CommemorativeRepository();
-    this.resolutionJobs = new ResolutionJobRepository();
+    const result = this.queue.then(run, run);
+    this.queue = result.catch(() => undefined);
+    return result;
   }
 
   async isConnected(): Promise<boolean> {
-    return true; // Always connected for in-memory
+    return true;
   }
 
-  async clear(): Promise<void> {
-    this.campaigns.clear();
-    this.pledges.clear();
-    this.oracles.clear();
-    this.commemoratives.clear();
-    this.resolutionJobs.clear();
+  async close(): Promise<void> {
+    // Nothing to release
+  }
+
+  /** Remove all data (tests) */
+  clear(): void {
+    this.tables = emptyTables();
   }
 }
-
-// Singleton instance
-export const memoryDatabase = new MemoryDatabaseService();
