@@ -4,6 +4,7 @@
  */
 
 import crypto from "crypto";
+import { postToUserUrl, webhookUrlProblem } from "../security/outbound";
 import {
   NotificationEventType,
   NotificationChannel,
@@ -36,6 +37,7 @@ export class NotificationService {
    * Create a new webhook
    */
   createWebhook(request: CreateWebhookRequest, createdBy: string): WebhookConfig {
+    assertDeliverableUrl(request.url);
     const id = this.generateId("webhook");
     const now = Date.now();
 
@@ -93,6 +95,9 @@ export class NotificationService {
     const webhook = this.webhooks.get(id);
     if (!webhook) {
       throw new Error(`Webhook ${id} not found`);
+    }
+    if (updates.url !== undefined) {
+      assertDeliverableUrl(updates.url);
     }
 
     const updated: WebhookConfig = {
@@ -252,20 +257,15 @@ export class NotificationService {
 
     for (let attempt = 1; attempt <= webhook.retryCount + 1; attempt++) {
       try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), webhook.timeout);
-
-        const response = await fetch(webhook.url, {
-          method: "POST",
+        // Refuses private/internal destinations and does not follow redirects
+        const response = await postToUserUrl(webhook.url, {
           headers,
           body: payloadString,
-          signal: controller.signal,
+          timeoutMs: webhook.timeout,
         });
 
-        clearTimeout(timeoutId);
-
-        const responseBody = await response.text().catch(() => "");
-        const success = response.ok;
+        const responseBody = response.body;
+        const success = response.status >= 200 && response.status < 300;
 
         log = {
           id: logId,
@@ -619,3 +619,13 @@ export class NotificationService {
 
 // Export singleton instance
 export const notificationService = new NotificationService();
+
+/**
+ * Reject webhook URLs that point at internal destinations
+ */
+function assertDeliverableUrl(url: string): void {
+  const problem = webhookUrlProblem(url);
+  if (problem) {
+    throw new Error(`Invalid webhook URL: ${problem}`);
+  }
+}
