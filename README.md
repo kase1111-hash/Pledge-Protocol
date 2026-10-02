@@ -223,6 +223,22 @@ This is commitment infrastructure. Making pledges real.
 - **IPFS/Arweave**: Permanent storage of campaign data and commemoratives
 - **Oracle networks**: Verified external data sources
 
+## Running the API
+
+```bash
+npm run build
+DATABASE_TYPE=postgresql DATABASE_URL=postgres://user:pass@host:5432/pledge \
+ADMIN_ADDRESSES=0xYourWallet CORS_ORIGINS=https://app.example.com \
+NODE_ENV=production npm run api:start
+```
+
+- **Storage.** With `DATABASE_TYPE=postgresql` the schema is created and migrated on startup, and the server refuses to start if the database is unreachable. `DATABASE_TYPE=memory` is for development only.
+- **What is stored where.** Campaigns, pledges, oracles and attestations live in their own tables with row locking. All other service state (sessions and roles, disputes, payments, social data, notifications, organizations, compliance records, scheduled resolutions, jobs, …) is loaded into memory at startup and written back before the API answers any request that changed it. That design assumes **a single API instance**; running several against one database would let their in-memory copies diverge.
+- **Access.** Sign in with a wallet signature (`/v1/auth/challenge`, `/v1/auth/verify`) and send the session as `Authorization: Bearer <sessionId>`. `ADMIN_ADDRESSES` bootstraps administrators, who can grant roles (`arbitrator`, `creator`, …) through `/v1/auth/roles/:address`.
+- **Webhooks** are only delivered to public addresses; set `ALLOW_PRIVATE_WEBHOOK_TARGETS=true` for local development.
+
+See `.env.example` for every setting.
+
 ## API Reference
 
 ### Advanced Pledge Types (Phase 4)
@@ -1867,38 +1883,45 @@ await sandbox.exportFixtures("./test/fixtures.json");
 Developer-friendly client library for integrating with Pledge Protocol:
 
 ```typescript
-import { createClient, ChainId } from "@pledge-protocol/sdk";
+import { createClient } from "@pledge-protocol/sdk";
 
 // Initialize client
 const client = createClient({
-  baseUrl: "https://api.pledgeprotocol.io",
-  chainId: ChainId.Polygon,
-  apiKey: "your-api-key", // Optional
+  apiUrl: "https://api.pledgeprotocol.io",
+  chainId: 137, // Polygon
 });
 
-// Switch chains
-const arbitrumClient = client.forChain(ChainId.Arbitrum);
+// Sign in with a wallet (ethers Wallet, browser signer, ...)
+await client.signIn(wallet.address, (message) => wallet.signMessage(message));
 
-// Campaigns
+// Switch chains
+const arbitrumClient = client.forChain(42161);
+
+// Campaigns (see CreateCampaignRequest for the full shape)
 const campaigns = await client.campaigns.list({ status: "active", limit: 10 });
 const campaign = await client.campaigns.get("campaign_123");
 const newCampaign = await client.campaigns.create({
   name: "Portland Marathon 2026",
   beneficiary: "0x...",
   milestones: [...],
+  pledgeTypes: [...],
+  ...
 });
+await client.campaigns.activate(newCampaign.data!.id);
 
-// Pledges
+// Pledges: amount is wei, escrowed against one of the campaign's pledge types
 const pledges = await client.pledges.list({ campaignId: "campaign_123" });
 const pledge = await client.pledges.create({
   campaignId: "campaign_123",
+  pledgeTypeId: "pt_0",
   amount: "50000000000000000000",
-  calculationType: "per_unit",
-  perUnitAmount: "2000000000000000000",
 });
+await client.pledges.cancel(pledge.data!.id); // only while pledging is open
 
-// Oracles
-const oracleResult = await client.oracles.query("oracle_id", { eventId: "123" });
+// Oracles: attestors decide milestones; the creator then resolves
+await client.oracles.submitAttestation({ campaignId: "campaign_123", milestoneId: "milestone_0", completed: true });
+const resolution = await client.campaigns.resolve("campaign_123");
+if (!resolution.success) console.log(resolution.code); // e.g. "MILESTONES_PENDING"
 
 // Disputes
 const dispute = await client.disputes.create({
@@ -1909,29 +1932,21 @@ const dispute = await client.disputes.create({
 });
 
 // Commemoratives
-const commemoratives = await client.commemoratives.listByBacker("0x...");
+const commemoratives = await client.commemoratives.listForBacker("0x...");
 
 // Users (social)
 const profile = await client.users.getProfile("0x...");
 await client.users.follow("0x...");
-const feed = await client.users.getFeed();
-
-// Authentication
-const challenge = await client.auth.getChallenge("0x...");
-const session = await client.auth.verify({
-  address: "0x...",
-  message: challenge.message,
-  signature: "0x...",
-});
-client.setSessionId(session.sessionId);
 ```
+
+Every call resolves to `{ success, data }` or `{ success: false, error, code, status }`; it never throws on HTTP errors.
 
 #### SDK Features
 
 - **Type-safe**: Full TypeScript types for all API responses
 - **Multi-chain**: Easy chain switching with `forChain()`
 - **Authentication**: Session and API key support
-- **Retry logic**: Automatic retries with exponential backoff
+- **Retry logic**: Automatic retries with exponential backoff for idempotent requests (GET/PUT/DELETE); POSTs are never repeated
 - **Error handling**: Structured error responses
 
 ### Rate Limiting (Phase 7)
@@ -2225,7 +2240,7 @@ src/
 ├── campaigns-advanced/ # Advanced campaigns (Phase 10)
 │   ├── types.ts
 │   └── advanced-campaign-service.ts
-└── database/        # PostgreSQL schema
+└── database/        # Persistent store (PostgreSQL / in-memory)
 
 test/                # Test suites
 ```

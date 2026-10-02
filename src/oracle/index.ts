@@ -8,7 +8,7 @@
 export * from "./types";
 
 // Base classes
-export { IOracleProvider, BaseOracleProvider } from "./base-provider";
+export { IOracleProvider, BaseOracleProvider, evaluateCondition } from "./base-provider";
 
 // Core Providers (Phase 2)
 export { ApiOracleProvider } from "./providers/api-provider";
@@ -40,5 +40,11 @@ export {
 
 // Core services
 export { OracleRouter, oracleRouter } from "./router";
-export { ResolutionEngine, IResolutionDataProvider } from "./resolution-engine";
+export {
+  ResolutionEngine,
+  ResolutionRefusedError,
+  IResolutionDataProvider,
+  PledgeForResolution,
+  ResolutionOutcome,
+} from "./resolution-engine";
 export { WebhookHandler, createWebhookEndpoint } from "./webhook-handler";

@@ -1,80 +1,36 @@
-import { Router, Request, Response } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
-import {
-  ResolutionEngine,
-  IResolutionDataProvider,
-  oracleRouter,
-  WebhookHandler,
-  ResolutionJob,
-} from "../../oracle";
+import { oracleRouter } from "../../oracle";
+import { authMiddleware, asyncHandler, hasRole, sameAddress } from "../../security/middleware";
+import { getStore } from "../../database";
+import { resolutionEngine, webhookHandler } from "../resolution-services";
 
 const router = Router();
 
-// Mock data provider for Phase 2 (replace with real DB/blockchain integration)
-class MockResolutionDataProvider implements IResolutionDataProvider {
-  private campaigns: Map<string, any> = new Map();
-  private pledges: Map<string, any[]> = new Map();
-
-  async getCampaign(campaignId: string) {
-    return this.campaigns.get(campaignId) || null;
+/**
+ * Only the campaign's creator or an admin may trigger or schedule its
+ * resolution. Reads the campaign ID from the body or the route.
+ */
+const requireCampaignOwner = asyncHandler(async (req: Request, res: Response, next: NextFunction) => {
+  const campaignId = req.params.campaignId ?? req.body?.campaignId;
+  if (typeof campaignId !== "string") {
+    return next();
   }
 
-  async getPledgesForCampaign(campaignId: string) {
-    return this.pledges.get(campaignId) || [];
+  const campaign = await getStore().getCampaign(campaignId);
+  if (!campaign) {
+    return res.status(404).json({
+      error: { code: "CAMPAIGN_NOT_FOUND", message: `Campaign with ID ${campaignId} does not exist` },
+    });
   }
 
-  async resolvePledge(
-    pledgeId: string,
-    releaseAmount: bigint,
-    refundAmount: bigint
-  ) {
-    console.log(`Resolving pledge ${pledgeId}: release=${releaseAmount}, refund=${refundAmount}`);
+  if (!sameAddress(campaign.creator, req.auth?.address) && !hasRole(req, "admin")) {
+    return res.status(403).json({
+      error: { code: "FORBIDDEN", message: "Only the campaign creator can resolve this campaign" },
+    });
   }
 
-  async updateCampaignStatus(
-    campaignId: string,
-    status: string,
-    totalReleased: string,
-    totalRefunded: string
-  ) {
-    console.log(`Campaign ${campaignId} -> ${status}: released=${totalReleased}, refunded=${totalRefunded}`);
-  }
-
-  async mintCommemorative(
-    pledgeId: string,
-    holder: string,
-    campaignId: string,
-    outcomeSummary: string
-  ) {
-    console.log(`Minting commemorative for pledge ${pledgeId}: ${outcomeSummary}`);
-  }
-
-  // Methods to populate mock data
-  setCampaign(campaignId: string, campaign: any) {
-    this.campaigns.set(campaignId, campaign);
-  }
-
-  setPledges(campaignId: string, pledges: any[]) {
-    this.pledges.set(campaignId, pledges);
-  }
-}
-
-// Initialize services
-const dataProvider = new MockResolutionDataProvider();
-const resolutionEngine = new ResolutionEngine(oracleRouter, dataProvider);
-const webhookHandler = new WebhookHandler(oracleRouter, resolutionEngine);
-
-// Resolution event logging
-resolutionEngine.on("resolution:queued", (job: ResolutionJob) => {
-  console.log(`Resolution queued: ${job.id} for campaign ${job.campaignId}`);
-});
-
-resolutionEngine.on("resolution:completed", (job: ResolutionJob) => {
-  console.log(`Resolution completed: ${job.id}`, job.result);
-});
-
-resolutionEngine.on("resolution:failed", (job: ResolutionJob) => {
-  console.error(`Resolution failed: ${job.id}`, job.error);
+  next();
 });
 
 // Validation schemas
@@ -89,7 +45,7 @@ const scheduleResolutionSchema = z.object({
 });
 
 // Trigger campaign resolution
-router.post("/trigger", async (req: Request, res: Response) => {
+router.post("/trigger", authMiddleware(), requireCampaignOwner, async (req: Request, res: Response) => {
   try {
     const body = triggerResolutionSchema.parse(req.body);
 
@@ -119,7 +75,7 @@ router.post("/trigger", async (req: Request, res: Response) => {
 });
 
 // Schedule automatic resolution
-router.post("/schedule", async (req: Request, res: Response) => {
+router.post("/schedule", authMiddleware(), requireCampaignOwner, async (req: Request, res: Response) => {
   try {
     const body = scheduleResolutionSchema.parse(req.body);
 
@@ -144,8 +100,21 @@ router.post("/schedule", async (req: Request, res: Response) => {
   }
 });
 
+// Get a campaign's scheduled resolution
+router.get("/schedule/:campaignId", (req: Request, res: Response) => {
+  const deadline = resolutionEngine.getScheduledResolutions().get(req.params.campaignId);
+
+  if (deadline === undefined) {
+    return res.status(404).json({
+      error: { code: "NOT_SCHEDULED", message: "No resolution is scheduled for this campaign" },
+    });
+  }
+
+  res.json({ campaignId: req.params.campaignId, scheduledFor: deadline });
+});
+
 // Cancel scheduled resolution
-router.delete("/schedule/:campaignId", (req: Request, res: Response) => {
+router.delete("/schedule/:campaignId", authMiddleware(), requireCampaignOwner, (req: Request, res: Response) => {
   const { campaignId } = req.params;
 
   resolutionEngine.cancelScheduledResolution(campaignId);
@@ -188,7 +157,7 @@ router.get("/campaigns/:campaignId/jobs", (req: Request, res: Response) => {
 });
 
 // Verify milestones for a campaign (dry run)
-router.post("/verify/:campaignId", async (req: Request, res: Response) => {
+router.post("/verify/:campaignId", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const { campaignId } = req.params;
     const { milestones } = req.body;
@@ -327,6 +296,3 @@ router.get("/webhooks/stats", (req: Request, res: Response) => {
 });
 
 export default router;
-
-// Export services for use in other modules
-export { resolutionEngine, webhookHandler, dataProvider };

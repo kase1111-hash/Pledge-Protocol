@@ -5,47 +5,44 @@
 
 import { Router, Request, Response } from "express";
 import { commemorativeService, storageService } from "../../tokens";
+import { authMiddleware, asyncHandler } from "../../security/middleware";
+import { getStore, PledgeStatus } from "../../database";
 
 const router = Router();
 
-// Note: These routes would typically query the blockchain/database
-// In Phase 1, we use in-memory storage which is shared with pledges route
+const pledgeStatuses: PledgeStatus[] = ["active", "resolved", "refunded", "cancelled"];
+
+/**
+ * Pledges made by an address, optionally filtered by ?status=
+ */
+async function pledgesFor(address: string, req: Request, res: Response) {
+  const status = req.query.status as PledgeStatus | undefined;
+  if (status !== undefined && !pledgeStatuses.includes(status)) {
+    return res.status(400).json({
+      error: { code: "INVALID_REQUEST", message: `status must be one of: ${pledgeStatuses.join(", ")}` },
+    });
+  }
+
+  const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 100);
+  const offset = Math.max(parseInt(String(req.query.offset ?? "0"), 10) || 0, 0);
+  const page = await getStore().listPledges({ backer: address, status, limit, offset });
+
+  res.json({
+    pledges: page.items,
+    total: page.total,
+    limit,
+    offset,
+  });
+}
 
 // Get pledges for authenticated backer
-router.get("/me/pledges", (req: Request, res: Response) => {
-  const walletAddress = req.headers["x-wallet-address"] as string;
-
-  if (!walletAddress) {
-    return res.status(401).json({
-      error: {
-        code: "UNAUTHORIZED",
-        message: "Wallet address required",
-      },
-    });
-  }
-
-  const { status } = req.query;
-
-  // In production, this would query the database/blockchain
-  // For Phase 1, return empty array (pledges are stored in pledges.ts)
-  res.json({
-    pledges: [],
-    total: 0,
-  });
-});
+router.get("/me/pledges", authMiddleware(), asyncHandler(async (req: Request, res: Response) => {
+  await pledgesFor(req.auth!.address, req, res);
+}));
 
 // Get commemoratives for authenticated backer (Phase 3)
-router.get("/me/commemoratives", (req: Request, res: Response) => {
-  const walletAddress = req.headers["x-wallet-address"] as string;
-
-  if (!walletAddress) {
-    return res.status(401).json({
-      error: {
-        code: "UNAUTHORIZED",
-        message: "Wallet address required",
-      },
-    });
-  }
+router.get("/me/commemoratives", authMiddleware(), (req: Request, res: Response) => {
+  const walletAddress = req.auth!.address;
 
   // Query commemoratives by backer address
   const records = commemorativeService.getByBackerAddress(walletAddress);
@@ -71,7 +68,7 @@ router.get("/me/commemoratives", (req: Request, res: Response) => {
 });
 
 // Get pledges for any address
-router.get("/:address/pledges", (req: Request, res: Response) => {
+router.get("/:address/pledges", asyncHandler(async (req: Request, res: Response) => {
   const { address } = req.params;
 
   // Validate address format
@@ -84,12 +81,8 @@ router.get("/:address/pledges", (req: Request, res: Response) => {
     });
   }
 
-  // In production, query blockchain/database
-  res.json({
-    pledges: [],
-    total: 0,
-  });
-});
+  await pledgesFor(address, req, res);
+}));
 
 // Get commemoratives for any address (Phase 3)
 router.get("/:address/commemoratives", (req: Request, res: Response) => {

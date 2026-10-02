@@ -13,7 +13,7 @@ import {
   ResolutionTier,
   VoteOption,
 } from "../../governance/types";
-import { authMiddleware } from "../../security/middleware";
+import { authMiddleware, requireRole } from "../../security/middleware";
 
 const router = Router();
 
@@ -61,9 +61,11 @@ const SubmitEvidenceSchema = z.object({
 /**
  * Cast vote schema
  */
+// The voter is the signed-in account and its voting power is the one assigned
+// when voting opened; values sent by the client are ignored.
 const CastVoteSchema = z.object({
-  voter: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
-  votingPower: z.string().min(1), // BigInt as string
+  voter: z.string().optional(),
+  votingPower: z.string().optional(),
   vote: z.enum(["release", "refund", "partial", "abstain"]),
   partialPercent: z.number().min(0).max(100).optional(),
   reason: z.string().max(1000).optional(),
@@ -83,8 +85,9 @@ const ResolveDisputeSchema = z.object({
 /**
  * Appeal schema
  */
+// The appellant is the signed-in account
 const AppealSchema = z.object({
-  appealedBy: z.string().regex(/^0x[a-fA-F0-9]{40}$/),
+  appealedBy: z.string().optional(),
   reason: z.string().min(20).max(2000),
 });
 
@@ -163,15 +166,7 @@ router.post("/", authMiddleware(), async (req: Request, res: Response) => {
       return;
     }
 
-    // Get raiser address from header or body
-    const raisedBy = req.headers["x-wallet-address"] as string || req.body.raisedBy;
-    if (!raisedBy || !/^0x[a-fA-F0-9]{40}$/.test(raisedBy)) {
-      res.status(400).json({
-        success: false,
-        error: "Valid wallet address required (x-wallet-address header or raisedBy field)",
-      });
-      return;
-    }
+    const raisedBy = req.auth!.address;
 
     const dispute = await disputeService.createDispute(parsed.data, raisedBy);
 
@@ -355,7 +350,7 @@ router.post("/:disputeId/evidence", authMiddleware(), async (req: Request, res: 
       return;
     }
 
-    const submittedBy = req.headers["x-wallet-address"] as string || req.body.submittedBy;
+    const submittedBy = req.auth!.address;
     if (!submittedBy) {
       res.status(400).json({
         success: false,
@@ -404,7 +399,7 @@ router.get("/:disputeId/evidence", (req: Request, res: Response) => {
  * POST /disputes/:disputeId/voting/open
  * Open voting on a dispute
  */
-router.post("/:disputeId/voting/open", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/:disputeId/voting/open", authMiddleware(), requireRole("arbitrator", "admin"), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const parsed = OpenVotingSchema.safeParse(req.body);
@@ -463,10 +458,11 @@ router.post("/:disputeId/voting/vote", authMiddleware(), async (req: Request, re
       return;
     }
 
+    const voter = req.auth!.address;
     const vote = await disputeService.castVote(
       disputeId,
-      parsed.data.voter,
-      BigInt(parsed.data.votingPower),
+      voter,
+      disputeService.getVotingPower(disputeId, voter),
       parsed.data.vote as VoteOption,
       parsed.data.partialPercent,
       parsed.data.reason
@@ -516,7 +512,7 @@ router.get("/:disputeId/voting/votes", (req: Request, res: Response) => {
  * POST /disputes/:disputeId/voting/close
  * Close voting on a dispute
  */
-router.post("/:disputeId/voting/close", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/:disputeId/voting/close", authMiddleware(), requireRole("arbitrator", "admin"), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const tally = await disputeService.closeVoting(disputeId);
@@ -544,7 +540,7 @@ router.post("/:disputeId/voting/close", authMiddleware(), async (req: Request, r
  * POST /disputes/:disputeId/resolve
  * Resolve a dispute (admin/council)
  */
-router.post("/:disputeId/resolve", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/:disputeId/resolve", authMiddleware(), requireRole("arbitrator", "admin"), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const parsed = ResolveDisputeSchema.safeParse(req.body);
@@ -618,7 +614,7 @@ router.post("/:disputeId/appeal", authMiddleware(), async (req: Request, res: Re
       return;
     }
 
-    await disputeService.appeal(disputeId, parsed.data.appealedBy, parsed.data.reason);
+    await disputeService.appeal(disputeId, req.auth!.address, parsed.data.reason);
 
     const dispute = disputeService.getDispute(disputeId);
 
@@ -642,7 +638,7 @@ router.post("/:disputeId/appeal", authMiddleware(), async (req: Request, res: Re
  * POST /disputes/:disputeId/escalate
  * Manually escalate a dispute
  */
-router.post("/:disputeId/escalate", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/:disputeId/escalate", authMiddleware(), requireRole("arbitrator", "admin"), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
     const { reason } = req.body;
@@ -680,10 +676,10 @@ router.post("/:disputeId/escalate", authMiddleware(), async (req: Request, res: 
  * POST /disputes/:disputeId/close
  * Close a dispute
  */
-router.post("/:disputeId/close", authMiddleware(), async (req: Request, res: Response) => {
+router.post("/:disputeId/close", authMiddleware(), requireRole("arbitrator", "admin"), async (req: Request, res: Response) => {
   try {
     const { disputeId } = req.params;
-    const closedBy = req.headers["x-wallet-address"] as string || req.body.closedBy || "system";
+    const closedBy = req.auth!.address;
 
     await disputeService.close(disputeId, closedBy);
 
@@ -703,7 +699,7 @@ router.post("/:disputeId/close", authMiddleware(), async (req: Request, res: Res
  * POST /disputes/process-timeouts
  * Process timeout escalations (called by scheduler)
  */
-router.post("/process-timeouts", authMiddleware(), async (_req: Request, res: Response) => {
+router.post("/process-timeouts", authMiddleware(), requireRole("admin", "system"), async (_req: Request, res: Response) => {
   try {
     const escalatedIds = await disputeService.processTimeouts();
 

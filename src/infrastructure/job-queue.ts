@@ -192,6 +192,22 @@ export class JobQueue {
   }
 
   /**
+   * Return jobs that were mid-run when the process stopped (as found after
+   * reloading persisted jobs) to the queue
+   */
+  requeueInterrupted(): number {
+    let count = 0;
+    for (const job of this.jobs.values()) {
+      if (job.status === "processing" && !this.processing.has(job.id)) {
+        job.status = "pending";
+        job.scheduledAt = Date.now();
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
    * Start processing jobs
    */
   start(): void {

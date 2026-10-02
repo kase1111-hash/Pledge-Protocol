@@ -216,6 +216,36 @@ describe("Resolution Engine", function () {
       // No error means success
     });
 
+    it("waits for deadlines beyond setTimeout's ~24.8 day limit", async function () {
+      const campaignId = "far-campaign";
+      const deadline = Math.floor(Date.now() / 1000) + 90 * 24 * 3600;
+      let queued = false;
+      engine.on("resolution:queued", (job) => {
+        if (job.campaignId === campaignId) queued = true;
+      });
+
+      engine.scheduleResolution(campaignId, deadline);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      // An overflowing timer would have fired at once
+      expect(queued).to.be.false;
+      expect(engine.getScheduledResolutions().get(campaignId)).to.equal(deadline);
+    });
+
+    it("re-arms recorded schedules, replacing rather than duplicating timers", async function () {
+      const campaignId = "rearm-campaign";
+      const deadline = Math.floor(Date.now() / 1000) + 3600;
+
+      engine.scheduleResolution(campaignId, deadline);
+      engine.scheduleResolution(campaignId, deadline + 60);
+      engine.shutdown(); // stops timers but keeps the recorded schedule
+      expect(engine.getScheduledResolutions().get(campaignId)).to.equal(deadline + 60);
+
+      engine.restoreScheduledResolutions();
+      engine.cancelScheduledResolution(campaignId);
+      expect(engine.getScheduledResolutions().has(campaignId)).to.be.false;
+    });
+
     it("should trigger immediately for past deadline", async function () {
       const campaignId = "past-deadline-campaign";
       const pastDeadline = Math.floor(Date.now() / 1000) - 100;

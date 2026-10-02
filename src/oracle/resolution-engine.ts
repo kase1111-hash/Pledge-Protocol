@@ -6,7 +6,25 @@ import {
   VerificationResult,
   ResolutionJob,
   ResolutionResult,
+  ResolutionRefusalCode,
 } from "./types";
+
+/** Longest delay setTimeout supports (2^31 - 1 ms) */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * Resolution was refused because of the campaign's current state (as opposed
+ * to an unexpected failure)
+ */
+export class ResolutionRefusedError extends Error {
+  constructor(
+    public readonly code: ResolutionRefusalCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "ResolutionRefusedError";
+  }
+}
 
 /**
  * Campaign milestone definition
@@ -17,6 +35,14 @@ interface CampaignMilestone {
   condition: MilestoneCondition;
   oracleParams: Record<string, any>;
   releasePercentage: number;
+  /**
+   * Recorded outcome, when the data provider tracks one. "verified"/"failed"/
+   * "expired" milestones are taken as decided and not re-queried; "pending"
+   * ones are queried, and block resolution until the resolution deadline.
+   * Omitted: every milestone is queried and the result taken as final.
+   */
+  status?: "pending" | "verified" | "failed" | "expired";
+  oracleData?: any;
 }
 
 /**
@@ -28,6 +54,8 @@ interface CampaignForResolution {
   beneficiary: string;
   milestones: CampaignMilestone[];
   resolutionDeadline: number;
+  /** When set, resolution is refused until the pledge window has closed */
+  pledgeWindowEnd?: number;
 }
 
 /**
@@ -60,7 +88,7 @@ interface CalculationParams {
 /**
  * Pledge for resolution
  */
-interface PledgeForResolution {
+export interface PledgeForResolution {
   id: string;
   campaignId: string;
   backer: string;
@@ -73,9 +101,25 @@ interface PledgeForResolution {
  * Resolution Engine
  * Phase 4: Handles automated campaign resolution with all pledge types
  */
+/**
+ * Everything a resolution decided, handed to the data provider in one call so
+ * it can be persisted atomically
+ */
+export interface ResolutionOutcome {
+  campaignId: string;
+  milestoneResults: VerificationResult[];
+  /** Final status per milestone ID */
+  milestoneStatuses: Record<string, "verified" | "failed" | "expired">;
+  pledges: { pledgeId: string; releaseAmount: bigint; refundAmount: bigint }[];
+  totalReleased: bigint;
+  totalRefunded: bigint;
+}
+
 export class ResolutionEngine extends EventEmitter {
   private jobs: Map<string, ResolutionJob> = new Map();
   private scheduledResolutions: Map<string, NodeJS.Timeout> = new Map();
+  /** Schedules as data (campaign ID -> deadline), so they can be persisted */
+  private scheduledDeadlines: Map<string, number> = new Map();
 
   constructor(
     private oracleRouter: OracleRouter,
@@ -91,6 +135,31 @@ export class ResolutionEngine extends EventEmitter {
     campaignId: string,
     triggeredBy: "manual" | "webhook" | "poll" | "schedule"
   ): Promise<ResolutionJob> {
+    const job = this.createJob(campaignId, triggeredBy);
+
+    // Process asynchronously
+    this.processResolution(job);
+
+    return job;
+  }
+
+  /**
+   * Resolve a campaign and wait for the outcome. The returned job is
+   * "completed" or "failed" (with job.error explaining why).
+   */
+  async resolveNow(
+    campaignId: string,
+    triggeredBy: "manual" | "webhook" | "poll" | "schedule"
+  ): Promise<ResolutionJob> {
+    const job = this.createJob(campaignId, triggeredBy);
+    await this.processResolution(job);
+    return job;
+  }
+
+  private createJob(
+    campaignId: string,
+    triggeredBy: "manual" | "webhook" | "poll" | "schedule"
+  ): ResolutionJob {
     // A timestamp alone collides when a campaign is triggered twice within the
     // same millisecond, which silently overwrote the earlier job in this.jobs.
     const jobId = `res_${campaignId}_${randomUUID().replace(/-/g, "")}`;
@@ -105,10 +174,6 @@ export class ResolutionEngine extends EventEmitter {
 
     this.jobs.set(jobId, job);
     this.emit("resolution:queued", job);
-
-    // Process asynchronously
-    this.processResolution(job);
-
     return job;
   }
 
@@ -123,11 +188,37 @@ export class ResolutionEngine extends EventEmitter {
       // Get campaign data
       const campaign = await this.dataProvider.getCampaign(job.campaignId);
       if (!campaign) {
-        throw new Error(`Campaign not found: ${job.campaignId}`);
+        throw new ResolutionRefusedError("campaign_not_found", `Campaign not found: ${job.campaignId}`);
+      }
+
+      if (campaign.status !== "active" && campaign.status !== "pledging_closed") {
+        throw new ResolutionRefusedError(
+          "invalid_status",
+          `Campaign cannot be resolved from status "${campaign.status}"`
+        );
+      }
+
+      const now = Date.now() / 1000;
+      if (campaign.pledgeWindowEnd !== undefined && now <= campaign.pledgeWindowEnd) {
+        throw new ResolutionRefusedError(
+          "pledge_window_open",
+          "Campaign cannot be resolved while its pledge window is open"
+        );
       }
 
       // Verify all milestones
       const milestoneResults = await this.verifyAllMilestones(campaign);
+
+      // Undecided milestones wait for the oracle until the resolution deadline
+      const undecided = campaign.milestones.filter(
+        (m, i) => m.status === "pending" && !milestoneResults[i].verified
+      );
+      if (undecided.length > 0 && now < campaign.resolutionDeadline) {
+        throw new ResolutionRefusedError(
+          "milestones_pending",
+          `Milestones not yet verified: ${undecided.map((m) => m.id).join(", ")}`
+        );
+      }
 
       // Calculate milestone completion
       const milestonesVerified = milestoneResults.filter((r) => r.verified).length;
@@ -139,7 +230,7 @@ export class ResolutionEngine extends EventEmitter {
       // Resolve each pledge
       let totalReleased = BigInt(0);
       let totalRefunded = BigInt(0);
-      let pledgesResolved = 0;
+      const pledgeOutcomes: ResolutionOutcome["pledges"] = [];
 
       for (const pledge of pledges) {
         const { releaseAmount, refundAmount } = this.calculatePledgeAmounts(
@@ -148,24 +239,50 @@ export class ResolutionEngine extends EventEmitter {
           campaign.milestones
         );
 
-        await this.dataProvider.resolvePledge(
-          pledge.id,
-          releaseAmount,
-          refundAmount
-        );
-
+        pledgeOutcomes.push({ pledgeId: pledge.id, releaseAmount, refundAmount });
         totalReleased += releaseAmount;
         totalRefunded += refundAmount;
-        pledgesResolved++;
       }
+      const pledgesResolved = pledgeOutcomes.length;
 
-      // Update campaign status
-      await this.dataProvider.updateCampaignStatus(
-        job.campaignId,
-        "resolved",
-        totalReleased.toString(),
-        totalRefunded.toString()
-      );
+      if (this.dataProvider.commitResolution) {
+        const milestoneStatuses: ResolutionOutcome["milestoneStatuses"] = {};
+        campaign.milestones.forEach((m, i) => {
+          if (milestoneResults[i].verified) {
+            milestoneStatuses[m.id] = "verified";
+          } else if (m.status === "pending" || m.status === "expired") {
+            // Still unverified at the resolution deadline
+            milestoneStatuses[m.id] = "expired";
+          } else {
+            milestoneStatuses[m.id] = "failed";
+          }
+        });
+
+        await this.dataProvider.commitResolution({
+          campaignId: job.campaignId,
+          milestoneResults,
+          milestoneStatuses,
+          pledges: pledgeOutcomes,
+          totalReleased,
+          totalRefunded,
+        });
+      } else {
+        for (const outcome of pledgeOutcomes) {
+          await this.dataProvider.resolvePledge(
+            outcome.pledgeId,
+            outcome.releaseAmount,
+            outcome.refundAmount
+          );
+        }
+
+        // Update campaign status
+        await this.dataProvider.updateCampaignStatus(
+          job.campaignId,
+          "resolved",
+          totalReleased.toString(),
+          totalRefunded.toString()
+        );
+      }
 
       // Mint commemoratives
       const commemorativesMinted = await this.mintCommemorative(
@@ -192,6 +309,9 @@ export class ResolutionEngine extends EventEmitter {
       job.status = "failed";
       job.processedAt = Date.now();
       job.error = (error as Error).message;
+      if (error instanceof ResolutionRefusedError) {
+        job.errorCode = error.code;
+      }
 
       this.emit("resolution:failed", job);
     }
@@ -206,6 +326,18 @@ export class ResolutionEngine extends EventEmitter {
     const results: VerificationResult[] = [];
 
     for (const milestone of campaign.milestones) {
+      if (milestone.status && milestone.status !== "pending") {
+        results.push({
+          milestoneId: milestone.id,
+          campaignId: campaign.id,
+          verified: milestone.status === "verified",
+          oracleData: milestone.oracleData ?? null,
+          evaluatedCondition: milestone.condition,
+          timestamp: Date.now(),
+        });
+        continue;
+      }
+
       const result = await this.oracleRouter.verifyMilestone(
         milestone.oracleId,
         campaign.id,
@@ -223,7 +355,7 @@ export class ResolutionEngine extends EventEmitter {
   /**
    * Calculate pledge amounts based on milestone results and pledge type
    */
-  private calculatePledgeAmounts(
+  calculatePledgeAmounts(
     pledge: PledgeForResolution,
     milestoneResults: VerificationResult[],
     milestones: CampaignMilestone[]
@@ -622,18 +754,46 @@ export class ResolutionEngine extends EventEmitter {
    * Schedule automatic resolution at deadline
    */
   scheduleResolution(campaignId: string, deadline: number): void {
+    this.cancelScheduledResolution(campaignId);
+    this.scheduledDeadlines.set(campaignId, deadline);
+    this.armTimer(campaignId, deadline);
+  }
+
+  /**
+   * Re-arm timers for every recorded schedule, e.g. after scheduledDeadlines
+   * was reloaded from storage at startup. Overdue ones run immediately.
+   */
+  restoreScheduledResolutions(): void {
+    for (const [campaignId, deadline] of this.scheduledDeadlines.entries()) {
+      if (!this.scheduledResolutions.has(campaignId)) {
+        this.armTimer(campaignId, deadline);
+      }
+    }
+  }
+
+  /** Recorded schedules: campaign ID -> deadline (unix seconds) */
+  getScheduledResolutions(): Map<string, number> {
+    return new Map(this.scheduledDeadlines.entries());
+  }
+
+  private armTimer(campaignId: string, deadline: number): void {
     const delay = deadline * 1000 - Date.now();
 
     if (delay <= 0) {
       // Deadline already passed
+      this.scheduledResolutions.delete(campaignId);
+      this.scheduledDeadlines.delete(campaignId);
       this.triggerResolution(campaignId, "schedule");
       return;
     }
 
+    // setTimeout cannot wait longer than ~24.8 days (it fires immediately
+    // instead), so long delays are covered by a chain of shorter timers
     const timer = setTimeout(() => {
-      this.triggerResolution(campaignId, "schedule");
       this.scheduledResolutions.delete(campaignId);
-    }, delay);
+      this.armTimer(campaignId, deadline);
+    }, Math.min(delay, MAX_TIMER_DELAY_MS));
+    timer.unref?.();
 
     this.scheduledResolutions.set(campaignId, timer);
   }
@@ -647,6 +807,7 @@ export class ResolutionEngine extends EventEmitter {
       clearTimeout(timer);
       this.scheduledResolutions.delete(campaignId);
     }
+    this.scheduledDeadlines.delete(campaignId);
   }
 
   /**
@@ -715,7 +876,7 @@ export class ResolutionEngine extends EventEmitter {
    * Shutdown the engine
    */
   shutdown(): void {
-    // Clear all scheduled resolutions
+    // Stop the timers; scheduledDeadlines is kept so schedules can be restored
     for (const timer of this.scheduledResolutions.values()) {
       clearTimeout(timer);
     }
@@ -748,4 +909,10 @@ export interface IResolutionDataProvider {
     campaignId: string,
     outcomeSummary: string
   ): Promise<void>;
+  /**
+   * Persist a whole resolution atomically. When implemented, the engine calls
+   * this instead of resolvePledge/updateCampaignStatus. Implementations should
+   * reject if the campaign was resolved concurrently.
+   */
+  commitResolution?(outcome: ResolutionOutcome): Promise<void>;
 }

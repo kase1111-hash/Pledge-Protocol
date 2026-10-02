@@ -7,8 +7,22 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { notificationService } from "../../notifications";
 import { NotificationEventType } from "../../notifications/types";
+import { authMiddleware, hasRole, sameAddress } from "../../security/middleware";
 
 const router = Router();
+
+// Webhook subscriptions belong to the account that created them
+router.use(authMiddleware());
+
+router.param("webhookId", (req, res, next, webhookId: string) => {
+  const webhook = notificationService.getWebhook(webhookId);
+  if (webhook && !sameAddress(webhook.createdBy, req.auth!.address) && !hasRole(req, "admin")) {
+    // Indistinguishable from a missing webhook, so IDs cannot be probed
+    res.status(404).json({ success: false, error: `Webhook "${webhookId}" not found` });
+    return;
+  }
+  next();
+});
 
 /**
  * All valid event types
@@ -105,7 +119,7 @@ router.post("/", (req: Request, res: Response) => {
       return;
     }
 
-    const createdBy = req.headers["x-wallet-address"] as string || "system";
+    const createdBy = req.auth!.address;
 
     const webhook = notificationService.createWebhook(
       {
@@ -133,7 +147,10 @@ router.post("/", (req: Request, res: Response) => {
  */
 router.get("/", (req: Request, res: Response) => {
   try {
-    const createdBy = req.query.createdBy as string | undefined;
+    // Admins may list anyone's (or everyone's) webhooks; others see their own
+    const createdBy = hasRole(req, "admin")
+      ? (req.query.createdBy as string | undefined)
+      : req.auth!.address;
     const webhooks = notificationService.listWebhooks(createdBy);
 
     res.json({

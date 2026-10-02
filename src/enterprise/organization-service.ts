@@ -64,6 +64,8 @@ export class OrganizationService {
     description?: string;
     website?: string;
   }): Organization {
+    // Addresses are stored lowercase so membership checks match sessions
+    params = { ...params, ownerAddress: params.ownerAddress.toLowerCase() };
     const orgId = `org_${randomUUID().replace(/-/g, "")}`;
     const now = Date.now();
 
@@ -142,7 +144,7 @@ export class OrganizationService {
   }
 
   getUserOrganizations(userAddress: string): Organization[] {
-    const orgIds = this.userOrgs.get(userAddress) || [];
+    const orgIds = this.userOrgs.get(userAddress.toLowerCase()) || [];
     return orgIds
       .map((id) => this.organizations.get(id))
       .filter((org): org is Organization => !!org);
@@ -174,7 +176,26 @@ export class OrganizationService {
 
     const before = { ...org };
 
-    Object.assign(org, updates, { updatedAt: Date.now() });
+    // The type above is not enforced at runtime (routes pass request bodies),
+    // so copy only the editable fields
+    const editable = [
+      "name",
+      "description",
+      "website",
+      "logoUrl",
+      "primaryColor",
+      "contactEmail",
+      "contactName",
+      "contactPhone",
+      "address",
+      "billingEmail",
+    ] as const;
+    const allowed: Record<string, unknown> = {};
+    for (const key of editable) {
+      if (updates[key] !== undefined) allowed[key] = updates[key];
+    }
+
+    Object.assign(org, allowed, { updatedAt: Date.now() });
 
     this.logAudit(orgId, {
       actorAddress,
@@ -240,6 +261,7 @@ export class OrganizationService {
       invitedBy?: string;
     }
   ): TeamMember {
+    params = { ...params, userAddress: params.userAddress.toLowerCase() };
     const memberId = `mem_${randomUUID().replace(/-/g, "")}`;
     const now = Date.now();
 
@@ -283,7 +305,7 @@ export class OrganizationService {
 
   getMember(orgId: string, userAddress: string): TeamMember | undefined {
     const members = this.members.get(orgId) || [];
-    return members.find((m) => m.userAddress === userAddress);
+    return members.find((m) => m.userAddress === userAddress.toLowerCase());
   }
 
   updateMemberRole(
@@ -322,6 +344,7 @@ export class OrganizationService {
     userAddress: string,
     actorAddress: string
   ): void {
+    userAddress = userAddress.toLowerCase();
     const members = this.members.get(orgId) || [];
     const member = members.find((m) => m.userAddress === userAddress);
 
@@ -404,6 +427,7 @@ export class OrganizationService {
   }
 
   acceptInvite(inviteToken: string, userAddress: string): TeamMember {
+    userAddress = userAddress.toLowerCase();
     let invite: TeamInvite | undefined;
 
     for (const inv of this.invites.values()) {

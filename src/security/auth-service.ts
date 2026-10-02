@@ -18,6 +18,20 @@ import {
 } from "./types";
 
 /**
+ * Addresses granted the admin role via ADMIN_ADDRESSES (comma-separated).
+ * This is how the first administrator is bootstrapped: role assignment over
+ * the API itself requires an admin.
+ */
+function configuredAdmins(): Set<string> {
+  return new Set(
+    (process.env.ADMIN_ADDRESSES || "")
+      .split(",")
+      .map((a) => a.trim().toLowerCase())
+      .filter((a) => a.length > 0)
+  );
+}
+
+/**
  * Authentication Service
  * Handles wallet-based authentication, session management, and API keys
  */
@@ -26,7 +40,9 @@ export class AuthService {
   private sessions: Map<string, Session> = new Map();
   private apiKeys: Map<string, ApiKey> = new Map();
   private userRoles: Map<string, UserRole[]> = new Map();
-  private securityEvents: SecurityEvent[] = [];
+  /** Event ID -> event, oldest first */
+  private securityEvents: Map<string, SecurityEvent> = new Map();
+  private securityEventCounter = 0;
 
   private readonly sessionTtlMs: number;
   private readonly challengeTtlMs: number;
@@ -333,7 +349,10 @@ export class AuthService {
    */
   getUserRoles(address: string): UserRole[] {
     const normalizedAddress = address.toLowerCase();
-    const roles = this.userRoles.get(normalizedAddress) || ["backer"];
+    const roles = [...(this.userRoles.get(normalizedAddress) || ["backer"])];
+    if (configuredAdmins().has(normalizedAddress) && !roles.includes("admin")) {
+      roles.push("admin");
+    }
     return roles;
   }
 
@@ -342,7 +361,8 @@ export class AuthService {
    */
   assignRole(address: string, role: UserRole): void {
     const normalizedAddress = address.toLowerCase();
-    const roles = this.userRoles.get(normalizedAddress) || [];
+    // Start from the default so assigning a role does not drop "backer"
+    const roles = this.userRoles.get(normalizedAddress) || ["backer"];
 
     if (!roles.includes(role)) {
       roles.push(role);
@@ -506,11 +526,12 @@ export class AuthService {
    * Emit a security event
    */
   private emitSecurityEvent(event: SecurityEvent): void {
-    this.securityEvents.push(event);
+    this.securityEvents.set(`${event.timestamp}-${++this.securityEventCounter}`, event);
 
-    // Keep only last 10000 events in memory
-    if (this.securityEvents.length > 10000) {
-      this.securityEvents = this.securityEvents.slice(-10000);
+    // Keep only the last 10000 events (Maps iterate oldest first)
+    for (const id of this.securityEvents.keys()) {
+      if (this.securityEvents.size <= 10000) break;
+      this.securityEvents.delete(id);
     }
   }
 
@@ -523,7 +544,7 @@ export class AuthService {
     since?: number;
     limit?: number;
   }): SecurityEvent[] {
-    let events = this.securityEvents;
+    let events = Array.from(this.securityEvents.values());
 
     if (options?.type) {
       events = events.filter((e) => e.type === options.type);
@@ -555,7 +576,7 @@ export class AuthService {
     const now = Date.now();
     const oneHourAgo = now - 60 * 60 * 1000;
 
-    const recentEvents = this.securityEvents.filter((e) => e.timestamp >= oneHourAgo);
+    const recentEvents = Array.from(this.securityEvents.values()).filter((e) => e.timestamp >= oneHourAgo);
 
     return {
       activeSessions: Array.from(this.sessions.values()).filter((s) => s.expiresAt > now).length,

@@ -788,9 +788,14 @@ export class ReportService {
     return this.scheduledReports.delete(reportId);
   }
 
+  getScheduledReport(reportId: string): ScheduledReport | null {
+    return this.scheduledReports.get(reportId) || null;
+  }
+
   listScheduledReports(address: string): ScheduledReport[] {
+    const owner = address.toLowerCase();
     return Array.from(this.scheduledReports.values()).filter(
-      (r) => r.createdBy === address
+      (r) => r.createdBy.toLowerCase() === owner
     );
   }
 
