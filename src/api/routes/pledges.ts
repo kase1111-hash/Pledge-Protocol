@@ -2,6 +2,7 @@ import { Router, Request, Response } from "express";
 import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import { authMiddleware } from "../../security/middleware";
+import { getCampaign } from "./campaigns";
 
 const router = Router();
 
@@ -38,9 +39,77 @@ const createPledgeSchema = z.object({
 router.post("/", authMiddleware(), async (req: Request, res: Response) => {
   try {
     const body = createPledgeSchema.parse(req.body);
+    const now = Math.floor(Date.now() / 1000);
+
+    const campaign = getCampaign(body.campaignId);
+    if (!campaign) {
+      return res.status(404).json({
+        error: {
+          code: "CAMPAIGN_NOT_FOUND",
+          message: `Campaign with ID ${body.campaignId} does not exist`,
+        },
+      });
+    }
+
+    if (
+      campaign.status !== "active" ||
+      now < campaign.pledgeWindowStart ||
+      now > campaign.pledgeWindowEnd
+    ) {
+      return res.status(409).json({
+        error: {
+          code: "CONFLICT",
+          message: "Campaign is not accepting pledges",
+        },
+      });
+    }
+
+    const pledgeType = campaign.pledgeTypes.find((pt) => pt.id === body.pledgeTypeId);
+    if (!pledgeType || !pledgeType.enabled) {
+      return res.status(422).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: `Pledge type ${body.pledgeTypeId} is not available for this campaign`,
+        },
+      });
+    }
+
+    const rawAmount = body.calculationParams?.amount;
+    if (typeof rawAmount !== "string" || !/^\d+$/.test(rawAmount) || BigInt(rawAmount) === 0n) {
+      return res.status(400).json({
+        error: {
+          code: "INVALID_REQUEST",
+          message: "calculationParams.amount must be a positive integer amount in wei",
+        },
+      });
+    }
+    const amount = BigInt(rawAmount);
+
+    // Enforce the stricter of the campaign-wide and pledge-type bounds
+    const minimums = [campaign.minimumPledge, pledgeType.minimum].map((v) => BigInt(v));
+    const maximums = [campaign.maximumPledge, pledgeType.maximum]
+      .filter((v): v is string => v !== null)
+      .map((v) => BigInt(v));
+    const minimum = minimums.reduce((a, b) => (a > b ? a : b));
+    if (amount < minimum) {
+      return res.status(422).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: `Pledge amount is below the minimum of ${minimum}`,
+        },
+      });
+    }
+    if (maximums.some((max) => amount > max)) {
+      const maximum = maximums.reduce((a, b) => (a < b ? a : b));
+      return res.status(422).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: `Pledge amount exceeds the maximum of ${maximum}`,
+        },
+      });
+    }
 
     const id = `pledge_${uuidv4().slice(0, 8)}`;
-    const now = Math.floor(Date.now() / 1000);
 
     const pledge: Pledge = {
       id,
@@ -49,7 +118,7 @@ router.post("/", authMiddleware(), async (req: Request, res: Response) => {
       pledgeTypeId: body.pledgeTypeId,
       backer: req.auth!.address,
       backerName: body.backerName || null,
-      escrowedAmount: body.calculationParams?.amount || "0",
+      escrowedAmount: amount.toString(),
       finalAmount: null,
       status: "active",
       createdAt: now,
@@ -59,6 +128,10 @@ router.post("/", authMiddleware(), async (req: Request, res: Response) => {
     };
 
     pledges.set(id, pledge);
+
+    campaign.totalEscrowed = (BigInt(campaign.totalEscrowed) + amount).toString();
+    campaign.pledgeCount += 1;
+    campaign.updatedAt = now;
 
     res.status(201).json({
       id: pledge.id,
@@ -119,6 +192,15 @@ router.delete("/:id", authMiddleware(), (req: Request, res: Response) => {
     });
   }
 
+  if (pledge.backer.toLowerCase() !== req.auth!.address.toLowerCase()) {
+    return res.status(403).json({
+      error: {
+        code: "FORBIDDEN",
+        message: "Only the backer can cancel this pledge",
+      },
+    });
+  }
+
   if (pledge.status !== "active") {
     return res.status(409).json({
       error: {
@@ -128,9 +210,26 @@ router.delete("/:id", authMiddleware(), (req: Request, res: Response) => {
     });
   }
 
+  // Mirrors PledgeManager.cancelPledge: cancellation only during the pledge window
   const now = Math.floor(Date.now() / 1000);
+  const campaign = getCampaign(pledge.campaignId);
+  if (!campaign || now < campaign.pledgeWindowStart || now > campaign.pledgeWindowEnd) {
+    return res.status(409).json({
+      error: {
+        code: "CONFLICT",
+        message: "Pledges can only be cancelled during the pledge window",
+      },
+    });
+  }
+
   pledge.status = "cancelled";
   pledge.resolvedAt = now;
+
+  const refunded = BigInt(pledge.escrowedAmount);
+  campaign.totalEscrowed = (BigInt(campaign.totalEscrowed) - refunded).toString();
+  campaign.totalRefunded = (BigInt(campaign.totalRefunded) + refunded).toString();
+  campaign.pledgeCount -= 1;
+  campaign.updatedAt = now;
 
   res.json({
     id: pledge.id,

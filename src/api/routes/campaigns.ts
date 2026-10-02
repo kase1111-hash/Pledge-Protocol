@@ -8,8 +8,19 @@ const router = Router();
 // In-memory storage for Phase 1 (replace with DB in production)
 const campaigns: Map<string, Campaign> = new Map();
 
+/**
+ * Look up a campaign from the shared in-memory store (used by the pledge routes)
+ */
+export function getCampaign(id: string): Campaign | undefined {
+  return campaigns.get(id);
+}
+
+function isCreator(campaign: Campaign, address: string): boolean {
+  return campaign.creator.toLowerCase() === address.toLowerCase();
+}
+
 // Types
-interface Campaign {
+export interface Campaign {
   id: string;
   chainId: string | null;
   name: string;
@@ -74,7 +85,7 @@ interface PledgeCondition {
   valueEnd?: number;
 }
 
-interface PledgeType {
+export interface PledgeType {
   id: string;
   name: string;
   description: string;
@@ -110,6 +121,9 @@ const conditionSchema = z.object({
   valueEnd: z.number().optional(),
 });
 
+// Amounts are wei, encoded as non-negative integer strings
+const weiAmount = z.string().regex(/^\d+$/, "Must be a non-negative integer amount in wei");
+
 // Validation schemas
 const createCampaignSchema = z.object({
   name: z.string().min(1).max(100),
@@ -141,21 +155,21 @@ const createCampaignSchema = z.object({
     name: z.string(),
     description: z.string(),
     calculationType: z.enum(["flat", "per_unit", "tiered", "conditional"]),
-    baseAmount: z.string().nullable().optional(),
+    baseAmount: weiAmount.nullable().optional(),
     // Per-unit fields
-    perUnitAmount: z.string().nullable().optional(),
+    perUnitAmount: weiAmount.nullable().optional(),
     unitField: z.string().nullable().optional(),
-    cap: z.string().nullable().optional(),
+    cap: weiAmount.nullable().optional(),
     // Tiered fields (Phase 4)
     tiers: z.array(tierSchema).nullable().optional(),
     // Conditional fields (Phase 4)
     condition: conditionSchema.nullable().optional(),
     // Common fields
-    minimum: z.string(),
-    maximum: z.string().nullable().optional(),
+    minimum: weiAmount,
+    maximum: weiAmount.nullable().optional(),
   })),
-  minimumPledge: z.string(),
-  maximumPledge: z.string().nullable().optional(),
+  minimumPledge: weiAmount,
+  maximumPledge: weiAmount.nullable().optional(),
   visibility: z.enum(["public", "semi-private", "private"]).optional(),
 });
 
@@ -259,6 +273,15 @@ router.post("/", authMiddleware(), async (req: Request, res: Response) => {
         error: {
           code: "VALIDATION_ERROR",
           message: "Milestone release percentages must sum to 100",
+        },
+      });
+    }
+
+    if (body.maximumPledge && BigInt(body.maximumPledge) < BigInt(body.minimumPledge)) {
+      return res.status(422).json({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "maximumPledge must not be less than minimumPledge",
         },
       });
     }
@@ -397,6 +420,15 @@ router.post("/:id/activate", authMiddleware(), (req: Request, res: Response) => 
     });
   }
 
+  if (!isCreator(campaign, req.auth!.address)) {
+    return res.status(403).json({
+      error: {
+        code: "FORBIDDEN",
+        message: "Only the campaign creator can activate this campaign",
+      },
+    });
+  }
+
   if (campaign.status !== "draft") {
     return res.status(409).json({
       error: {
@@ -435,6 +467,15 @@ router.post("/:id/resolve", authMiddleware(), (req: Request, res: Response) => {
       error: {
         code: "CAMPAIGN_NOT_FOUND",
         message: `Campaign with ID ${req.params.id} does not exist`,
+      },
+    });
+  }
+
+  if (!isCreator(campaign, req.auth!.address)) {
+    return res.status(403).json({
+      error: {
+        code: "FORBIDDEN",
+        message: "Only the campaign creator can resolve this campaign",
       },
     });
   }
