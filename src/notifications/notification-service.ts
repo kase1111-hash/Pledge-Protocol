@@ -193,6 +193,11 @@ export class NotificationService {
       // Must be subscribed to event type
       if (!webhook.events.includes(event.type)) return false;
 
+      // Restricted events only reach their audience's webhooks
+      if (event.audience && !event.audience.some((a) => a.toLowerCase() === webhook.createdBy.toLowerCase())) {
+        return false;
+      }
+
       // Filter by campaign if specified
       if (webhook.campaignIds && webhook.campaignIds.length > 0) {
         if (!event.campaignId || !webhook.campaignIds.includes(event.campaignId)) {
@@ -202,7 +207,8 @@ export class NotificationService {
 
       // Filter by address if specified
       if (webhook.addresses && webhook.addresses.length > 0) {
-        if (!event.actorAddress || !webhook.addresses.includes(event.actorAddress)) {
+        const actor = event.actorAddress?.toLowerCase();
+        if (!actor || !webhook.addresses.some((a) => a.toLowerCase() === actor)) {
           return false;
         }
       }

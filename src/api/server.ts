@@ -17,6 +17,7 @@ import { restorePersistentState, flushPersistentState } from "./persistence";
 import { reportService } from "../reporting";
 import { gdprService } from "./routes/compliance";
 import { advancedCampaignService } from "../campaigns-advanced";
+import { flushEvents } from "../events";
 
 const PORT = env.PORT;
 
@@ -104,11 +105,12 @@ initializeDatabase({
     clearInterval(flushInterval);
     clearInterval(reportInterval);
 
-    // Stop accepting connections; once in-flight requests finish, store any
-    // remaining changes and close the database
+    // Stop accepting connections; once in-flight requests finish, deliver
+    // published events, store any remaining changes and close the database
     server.close(() => {
       logger.info("HTTP server closed");
-      flushPersistentState()
+      flushEvents()
+        .then(() => flushPersistentState())
         .catch((err) => logger.error("Final state flush failed", err))
         .then(() => closeDatabase())
         .then(() => process.exit(0))

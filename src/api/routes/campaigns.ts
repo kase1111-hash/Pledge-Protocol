@@ -11,6 +11,7 @@ import {
   Tier,
 } from "../../database";
 import { resolutionEngine } from "../resolution-services";
+import { campaignEvent, milestoneEvent } from "../../events";
 
 const router = Router();
 
@@ -297,6 +298,7 @@ router.post("/", authMiddleware(), asyncHandler(async (req: Request, res: Respon
   };
 
   await getStore().saveCampaign(campaign);
+  campaignEvent("campaign_created", campaign);
 
   res.status(201).json(campaign);
 }));
@@ -382,11 +384,14 @@ router.post("/:id/activate", authMiddleware(), asyncHandler(async (req: Request,
     campaign.updatedAt = timestamp;
     await tx.saveCampaign(campaign);
 
-    return () => res.json({
-      id: campaign.id,
-      status: campaign.status,
-      activatedAt: timestamp,
-    });
+    return () => {
+      campaignEvent("campaign_activated", campaign);
+      res.json({
+        id: campaign.id,
+        status: campaign.status,
+        activatedAt: timestamp,
+      });
+    };
   });
 
   result();
@@ -430,12 +435,15 @@ router.post("/:id/cancel", authMiddleware(), asyncHandler(async (req: Request, r
     campaign.updatedAt = timestamp;
     await tx.saveCampaign(campaign);
 
-    return () => res.json({
-      id: campaign.id,
-      status: campaign.status,
-      pledgesRefunded: active.items.length,
-      totalRefunded: refunded.toString(),
-    });
+    return () => {
+      campaignEvent("campaign_cancelled", campaign);
+      res.json({
+        id: campaign.id,
+        status: campaign.status,
+        pledgesRefunded: active.items.length,
+        totalRefunded: refunded.toString(),
+      });
+    };
   });
 
   result();
@@ -482,16 +490,18 @@ router.post(
     );
 
     if (result.verified) {
-      await store.transaction(async (tx) => {
+      const recorded = await store.transaction(async (tx) => {
         const current = await tx.getCampaign(campaign.id, { forUpdate: true });
         const target = current?.milestones.find((m) => m.id === milestone.id);
-        if (!current || !target || target.status !== "pending") return;
+        if (!current || !target || target.status !== "pending") return false;
         target.status = "verified";
         target.verifiedAt = now();
         target.oracleData = result.oracleData;
         current.updatedAt = now();
         await tx.saveCampaign(current);
+        return true;
       });
+      if (recorded) milestoneEvent("milestone_verified", campaign, milestone.id);
     }
 
     res.json({

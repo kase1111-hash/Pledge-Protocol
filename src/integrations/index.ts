@@ -12,4 +12,6 @@ export {
   IntegrationService,
   createIntegrationService,
   integrationService,
+  integrationSignature,
+  ProviderEndpoints,
 } from "./integration-service";

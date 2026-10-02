@@ -11,6 +11,7 @@ import {
 } from "../../security/middleware";
 import { getStore, Attestation, Oracle } from "../../database";
 import { webhookHandler } from "../resolution-services";
+import { milestoneEvent } from "../../events";
 
 const router = Router();
 
@@ -322,12 +323,15 @@ router.post("/attestations", authMiddleware(), asyncHandler(async (req: Request,
     campaign.updatedAt = timestamp;
     await tx.saveCampaign(campaign);
 
-    return () => res.status(201).json({
-      attestationId: attestation.id,
-      milestoneId: milestone.id,
-      milestoneStatus: milestone.status,
-      submittedAt: timestamp,
-    });
+    return () => {
+      milestoneEvent(verified ? "milestone_verified" : "milestone_failed", campaign, milestone.id);
+      res.status(201).json({
+        attestationId: attestation.id,
+        milestoneId: milestone.id,
+        milestoneStatus: milestone.status,
+        submittedAt: timestamp,
+      });
+    };
   });
 
   result();

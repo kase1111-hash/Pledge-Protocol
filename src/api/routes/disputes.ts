@@ -14,8 +14,21 @@ import {
   VoteOption,
 } from "../../governance/types";
 import { authMiddleware, requireRole } from "../../security/middleware";
+import { getStore } from "../../database";
+import { disputeEvent } from "../../events";
 
 const router = Router();
+
+/**
+ * Tell the campaign's creator, the raiser and subscribers about a dispute
+ */
+async function publishDispute(
+  type: "dispute_created" | "dispute_resolved",
+  dispute: { id: string; campaignId: string; raisedBy: string; category: string; title: string }
+): Promise<void> {
+  const campaign = await getStore().getCampaign(dispute.campaignId);
+  if (campaign) disputeEvent(type, campaign, dispute);
+}
 
 /**
  * Create dispute schema
@@ -169,6 +182,7 @@ router.post("/", authMiddleware(), async (req: Request, res: Response) => {
     const raisedBy = req.auth!.address;
 
     const dispute = await disputeService.createDispute(parsed.data, raisedBy);
+    await publishDispute("dispute_created", dispute);
 
     res.status(201).json({
       success: true,
@@ -580,6 +594,7 @@ router.post("/:disputeId/resolve", authMiddleware(), requireRole("arbitrator", "
       rationale: parsed.data.rationale,
       evidenceIds: parsed.data.evidenceIds || [],
     });
+    await publishDispute("dispute_resolved", dispute);
 
     res.json({
       success: true,

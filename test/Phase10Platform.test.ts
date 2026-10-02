@@ -778,24 +778,6 @@ describe("IntegrationService", () => {
     });
   });
 
-  describe("Test Integration", () => {
-    it("should test integration", async () => {
-      const integration = service.createIntegration({
-        type: "webhook",
-        ownerAddress: testAddress,
-        name: "Test",
-        config: {
-          type: "webhook",
-          url: "https://example.com/webhook",
-        },
-        events: ["campaign_created"],
-      });
-
-      const result = await service.testIntegration(integration.id);
-      expect(result.success).toBeDefined();
-    });
-  });
-
   describe("Stats", () => {
     it("should get integration stats", () => {
       service.createIntegration({

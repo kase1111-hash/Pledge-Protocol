@@ -17,6 +17,10 @@ import { closeDatabase, setStore } from "../src/database";
 import { storeBackends } from "./helpers/stores";
 import { gdprService } from "../src/api/routes/compliance";
 import { getStore } from "../src/database";
+import { flushEvents } from "../src/events";
+import { notificationService } from "../src/notifications";
+import http from "http";
+import { AddressInfo } from "net";
 
 const ADDRESS_PATTERN = /^0x[a-fA-F0-9]{40}$/;
 const HOUR = 3600;
@@ -754,6 +758,123 @@ for (const backend of storeBackends("api_integration_test")) {
 
         expect((await as(sessions.stranger).get(`/v1/analytics/backers/${backer.address}/portfolio`)).status).toBe(403);
         expect((await as(sessions.stranger).get(`/v1/i18n/preferences/${backer.address}`)).status).toBe(403);
+      });
+    });
+
+    describe("platform events", () => {
+      let server: http.Server;
+      let hookUrl: string;
+      let deliveries: { path: string; headers: http.IncomingHttpHeaders; body: any }[];
+
+      beforeAll(async () => {
+        process.env.ALLOW_PRIVATE_WEBHOOK_TARGETS = "true";
+        deliveries = [];
+        server = http.createServer((req, res) => {
+          const chunks: Buffer[] = [];
+          req.on("data", (c) => chunks.push(c));
+          req.on("end", () => {
+            deliveries.push({ path: req.url!, headers: req.headers, body: JSON.parse(Buffer.concat(chunks).toString()) });
+            res.end("ok");
+          });
+        });
+        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+        hookUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+      });
+
+      afterAll(async () => {
+        delete process.env.ALLOW_PRIVATE_WEBHOOK_TARGETS;
+        await new Promise((resolve) => server.close(resolve));
+      });
+
+      it("reach webhooks, integrations and in-app notifications", async () => {
+        const subscribe = async (session: string, path: string) => {
+          const created = await as(session).post("/v1/webhooks", {
+            name: path,
+            url: `${hookUrl}${path}`,
+            events: ["pledge_created", "milestone_verified", "campaign_resolved"],
+          });
+          expect(created.status).toBe(201);
+          return created.body.data.id as string;
+        };
+        const hooks = [await subscribe(sessions.creator, "/creator"), await subscribe(sessions.stranger, "/stranger")];
+        const slack = await as(sessions.creator).post("/v1/integrations", {
+          type: "zapier",
+          name: "Zap",
+          config: { type: "zapier", webhookUrl: `${hookUrl}/zapier` },
+          events: ["pledge_created"],
+        });
+        expect(slack.status).toBe(201);
+
+        try {
+          const campaignId = await activeCampaign();
+          await pledge(campaignId, "500");
+          await flushEvents();
+
+          const pledged = deliveries.filter((d) => d.body.type === "pledge_created" || d.body.event === "pledge_created");
+          expect(pledged.map((d) => d.path).sort()).toEqual(["/creator", "/stranger", "/zapier"]);
+          expect(pledged.find((d) => d.path === "/creator")!.body).toMatchObject({
+            data: { campaignId, amount: "500", backerAddress: backer.address.toLowerCase() },
+          });
+
+          // The creator hears about the pledge in-app, as does the backer
+          for (const address of [creator.address, backer.address]) {
+            const inbox = notificationService.getNotifications({ recipient: address, eventType: "pledge_created" });
+            expect(inbox.map((n) => n.data.campaignId)).toContain(campaignId);
+          }
+
+          // Resolution reaches subscribers, and backers hear what happened to their pledge
+          advance(HOUR + 1);
+          const milestoneId = (await as(null).get(`/v1/campaigns/${campaignId}`)).body.milestones[0].id;
+          expect((await attest(campaignId, milestoneId, true)).status).toBe(201);
+          expect((await resolve(campaignId)).status).toBe(200);
+          await flushEvents();
+
+          expect(deliveries.filter((d) => d.body.type === "campaign_resolved").map((d) => d.path).sort()).toEqual([
+            "/creator",
+            "/stranger",
+          ]);
+          const released = notificationService.getNotifications({ recipient: backer.address, eventType: "pledge_released" });
+          expect(released.map((n) => n.data.campaignId)).toContain(campaignId);
+        } finally {
+          for (const [i, id] of hooks.entries()) {
+            await as(i === 0 ? sessions.creator : sessions.stranger).delete(`/v1/webhooks/${id}`);
+          }
+          await as(sessions.creator).delete(`/v1/integrations/${slack.body.id}`);
+        }
+      });
+
+      it("keep events about private campaigns to the creator's subscriptions", async () => {
+        const created = await as(sessions.stranger).post("/v1/webhooks", {
+          name: "Firehose",
+          url: `${hookUrl}/firehose`,
+          events: ["campaign_created"],
+        });
+        try {
+          deliveries = [];
+          const start = now();
+          const response = await as(sessions.creator).post("/v1/campaigns", {
+            name: "Private",
+            description: "Members only",
+            beneficiary: creator.address,
+            beneficiaryName: "Club",
+            pledgeWindowStart: start,
+            pledgeWindowEnd: start + HOUR,
+            resolutionDeadline: start + 24 * HOUR,
+            visibility: "private",
+            milestones: [{
+              name: "Finish", description: "Finish", oracleId: attestationOracleId,
+              condition: { type: "completion", field: "completed", operator: "eq", value: true },
+              releasePercentage: 100,
+            }],
+            pledgeTypes: [{ name: "Pledge", description: "Pledge", calculationType: "flat", minimum: "100" }],
+            minimumPledge: "100",
+          });
+          expect(response.status).toBe(201);
+          await flushEvents();
+          expect(deliveries).toEqual([]);
+        } finally {
+          await as(sessions.stranger).delete(`/v1/webhooks/${created.body.data.id}`);
+        }
       });
     });
 

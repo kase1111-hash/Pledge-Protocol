@@ -37,6 +37,7 @@ import { formatEther } from "ethers";
 import { Campaign, getStore, Milestone, Pledge } from "../database";
 import { oracleRouter } from "../oracle";
 import { notificationService } from "../notifications";
+import { campaignEvent, milestoneEvent } from "../events";
 
 // ============================================================================
 // DEFAULT SETTINGS
@@ -673,7 +674,8 @@ export class AdvancedCampaignService implements AdvancedCampaignServiceInterface
       campaign.status = "active";
       campaign.updatedAt = nowSeconds();
       await tx.saveCampaign(campaign);
-    });
+      return campaign;
+    }).then((campaign) => campaignEvent("campaign_activated", campaign));
   }
 
   /** Active → pledging closed: no new pledges, resolution unaffected */
@@ -685,7 +687,8 @@ export class AdvancedCampaignService implements AdvancedCampaignServiceInterface
       campaign.status = "pledging_closed";
       campaign.updatedAt = nowSeconds();
       await tx.saveCampaign(campaign);
-    });
+      return campaign;
+    }).then((campaign) => campaignEvent("campaign_deadline_reached", campaign));
   }
 
   /** In-app notification to the campaign's creator and/or backers */
@@ -718,6 +721,7 @@ export class AdvancedCampaignService implements AdvancedCampaignServiceInterface
       milestoneId: typeof params.milestoneId === "string" ? params.milestoneId : undefined,
       actorType: "system",
       recipients: Array.from(recipients),
+      audience: [campaign.creator],
       data: { ...params, campaignName: campaign.name },
       summary: message,
       priority: "normal",
@@ -754,16 +758,18 @@ export class AdvancedCampaignService implements AdvancedCampaignServiceInterface
         milestone.oracleParams
       );
       if (result.verified) {
-        await getStore().transaction(async (tx) => {
+        const recorded = await getStore().transaction(async (tx) => {
           const current = await tx.getCampaign(campaign.id, { forUpdate: true });
           const target = current?.milestones.find((m) => m.id === milestone.id);
-          if (!current || !target || target.status !== "pending") return;
+          if (!current || !target || target.status !== "pending") return false;
           target.status = "verified";
           target.verifiedAt = nowSeconds();
           target.oracleData = result.oracleData;
           current.updatedAt = nowSeconds();
           await tx.saveCampaign(current);
+          return true;
         });
+        if (recorded) milestoneEvent("milestone_verified", campaign, milestone.id);
         status = "verified";
       } else if (result.error) {
         throw new Error(`Oracle check failed: ${result.error}`);

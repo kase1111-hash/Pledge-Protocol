@@ -181,6 +181,12 @@ export interface NotificationEvent {
   /** Addressed to these users only, instead of the actor and subscribers */
   recipients?: string[];
 
+  /**
+   * Only webhooks created by these addresses may receive the event (e.g. the
+   * creator of a non-public campaign); anyone subscribed when unset
+   */
+  audience?: string[];
+
   // Payload
   data: Record<string, any>;
   summary: string; // Human-readable summary
