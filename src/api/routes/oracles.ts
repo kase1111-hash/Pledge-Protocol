@@ -11,6 +11,7 @@ import {
 } from "../../security/middleware";
 import { getStore, Attestation, Oracle } from "../../database";
 import { webhookHandler } from "../resolution-services";
+import { webhookUrlProblem } from "../../security/outbound";
 import { milestoneEvent } from "../../events";
 
 const router = Router();
@@ -46,6 +47,12 @@ const registerOracleSchema = z
   .refine((o) => o.type !== "api" || o.endpoint, {
     message: "API oracles require an endpoint",
     path: ["endpoint"],
+  })
+  .superRefine((o, ctx) => {
+    const problem = o.endpoint ? webhookUrlProblem(o.endpoint) : null;
+    if (problem) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: problem, path: ["endpoint"] });
+    }
   });
 
 const queryOracleSchema = z.object({

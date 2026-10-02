@@ -141,7 +141,7 @@ export class StravaProvider extends ApiOracleProvider {
 
     try {
       const response = await fetch(
-        `${StravaProvider.STRAVA_API_BASE}/activities/${activityId}`,
+        `${StravaProvider.STRAVA_API_BASE}/activities/${encodeURIComponent(activityId)}`,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,

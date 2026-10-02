@@ -932,6 +932,18 @@ for (const backend of storeBackends("api_integration_test")) {
     });
 
     describe("oracles", () => {
+      it("refuses API oracles pointing at internal addresses", async () => {
+        for (const endpoint of ["http://169.254.169.254/latest/meta-data/", "http://localhost:5432/", "http://10.0.0.5/api"]) {
+          const response = await as(sessions.admin).post("/v1/oracles", {
+            name: "Internal",
+            description: "",
+            type: "api",
+            endpoint,
+          });
+          expect(response.status).toBe(400);
+        }
+      });
+
       it("never exposes oracle config, which can hold credentials", async () => {
         const created = await as(sessions.admin).post("/v1/oracles", {
           name: "Timing API",

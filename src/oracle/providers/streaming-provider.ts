@@ -151,7 +151,7 @@ export class StreamingProvider extends ApiOracleProvider {
       throw new Error("Use Spotify provider for album verification");
     }
 
-    return this.queryWithAuth(`/albums/${albumId}`);
+    return this.queryWithAuth(`/albums/${encodeURIComponent(albumId)}`);
   }
 
   /**
@@ -196,7 +196,7 @@ export class StreamingProvider extends ApiOracleProvider {
       throw new Error("Use Twitch provider for channel info");
     }
 
-    return this.queryWithAuth(`/users?login=${channelName}`);
+    return this.queryWithAuth(`/users?login=${encodeURIComponent(channelName)}`);
   }
 
   /**
@@ -207,7 +207,7 @@ export class StreamingProvider extends ApiOracleProvider {
       throw new Error("Use Twitch provider for follower count");
     }
 
-    return this.queryWithAuth(`/channels/followers?broadcaster_id=${broadcasterId}&first=1`);
+    return this.queryWithAuth(`/channels/followers?broadcaster_id=${encodeURIComponent(broadcasterId)}&first=1`);
   }
 
   /**
