@@ -77,7 +77,7 @@ export function registerPersistentState(): void {
   // index is needed to find a provider's session after a restart
   const providers = (paymentProcessor as unknown as Fields).providers as Map<string, object>;
   for (const [name, provider] of providers) {
-    bindMaps(`payments.${name}`, provider, ["sessionIndex"]);
+    bindMaps(`payments.${name}`, provider, "subscriptions" in provider ? ["sessionIndex", "subscriptions"] : ["sessionIndex"]);
   }
   const settlements = (paymentProcessor as unknown as Fields).settlementService as object;
   bindMaps("settlements", settlements, ["settlements", "batches"]);

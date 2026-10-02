@@ -411,6 +411,8 @@ export interface StripeConfig {
   publishableKey: string;
   webhookSecret: string;
   accountId?: string; // Connected account
+  /** Stripe API host override (testing against a local stand-in) */
+  apiHost?: { host: string; port: number; protocol: "http" | "https" };
 }
 
 export interface CircleConfig {

@@ -41,6 +41,9 @@ export class StripeProvider implements PaymentProviderInterface {
   private sessionIndex: Map<string, { stripeSessionId: string; session: CheckoutSession }> =
     new Map();
 
+  // Subscriptions by our ID (they hold the Stripe subscription ID)
+  private subscriptions: Map<string, Subscription> = new Map();
+
   constructor(config: StripeConfig) {
     this.config = config;
   }
@@ -59,7 +62,7 @@ export class StripeProvider implements PaymentProviderInterface {
           "Stripe is not configured: set STRIPE_SECRET_KEY to use card payments"
         );
       }
-      this.stripeClient = new Stripe(this.config.secretKey);
+      this.stripeClient = new Stripe(this.config.secretKey, this.config.apiHost ?? {});
     }
     return this.stripeClient;
   }
@@ -276,13 +279,7 @@ export class StripeProvider implements PaymentProviderInterface {
   async createSubscription(
     request: CreateSubscriptionRequest
   ): Promise<Subscription> {
-    // Create or retrieve Stripe customer
-    const customer = await this.stripe.customers.create({
-      metadata: {
-        backerAddress: request.backerAddress,
-        campaignId: request.campaignId,
-      },
-    });
+    const customer = await this.customerFor(request.backerAddress, true);
 
     // Create a price for this subscription
     const price = await this.stripe.prices.create({
@@ -338,28 +335,73 @@ export class StripeProvider implements PaymentProviderInterface {
       createdAt: now,
     };
 
+    this.subscriptions.set(subscription.id, subscription);
+    return subscription;
+  }
+
+  getSubscription(subscriptionId: string): Subscription | undefined {
+    return this.subscriptions.get(subscriptionId);
+  }
+
+  private subscriptionOrThrow(subscriptionId: string): Subscription {
+    const subscription = this.subscriptions.get(subscriptionId);
+    if (!subscription?.providerSubscriptionId) {
+      throw this.createError("processing_error", `Subscription ${subscriptionId} not found`);
+    }
     return subscription;
   }
 
   async cancelSubscription(subscriptionId: string): Promise<Subscription> {
-    throw this.createError(
-      "processing_error",
-      "Cancel via provider subscription ID using webhook handler"
-    );
+    const subscription = this.subscriptionOrThrow(subscriptionId);
+    await this.stripe.subscriptions.cancel(subscription.providerSubscriptionId!);
+    subscription.status = "cancelled";
+    subscription.nextPaymentAt = undefined;
+    this.subscriptions.set(subscriptionId, subscription);
+    return subscription;
   }
 
+  /** Stop collecting payments; invoices during the pause are voided */
   async pauseSubscription(subscriptionId: string): Promise<Subscription> {
-    throw this.createError(
-      "processing_error",
-      "Pause via provider subscription ID using webhook handler"
-    );
+    const subscription = this.subscriptionOrThrow(subscriptionId);
+    if (subscription.status !== "active") {
+      throw this.createError("processing_error", `Subscription is ${subscription.status}`);
+    }
+    await this.stripe.subscriptions.update(subscription.providerSubscriptionId!, {
+      pause_collection: { behavior: "void" },
+    });
+    subscription.status = "paused";
+    this.subscriptions.set(subscriptionId, subscription);
+    return subscription;
   }
 
   async resumeSubscription(subscriptionId: string): Promise<Subscription> {
-    throw this.createError(
-      "processing_error",
-      "Resume via provider subscription ID using webhook handler"
-    );
+    const subscription = this.subscriptionOrThrow(subscriptionId);
+    if (subscription.status !== "paused") {
+      throw this.createError("processing_error", `Subscription is ${subscription.status}`);
+    }
+    await this.stripe.subscriptions.update(subscription.providerSubscriptionId!, {
+      pause_collection: "",
+    });
+    subscription.status = "active";
+    this.subscriptions.set(subscriptionId, subscription);
+    return subscription;
+  }
+
+  /**
+   * The Stripe customer for a backer, found by the address in its metadata;
+   * created when `create` is set and there is none
+   */
+  private async customerFor(backerAddress: string, create: true): Promise<Stripe.Customer>;
+  private async customerFor(backerAddress: string, create?: false): Promise<Stripe.Customer | null>;
+  private async customerFor(backerAddress: string, create = false): Promise<Stripe.Customer | null> {
+    const address = backerAddress.toLowerCase();
+    const found = await this.stripe.customers.search({
+      query: `metadata['backerAddress']:'${address.replace(/[^0-9a-zx]/g, "")}'`,
+      limit: 1,
+    });
+    if (found.data[0]) return found.data[0];
+    if (!create) return null;
+    return this.stripe.customers.create({ metadata: { backerAddress: address } });
   }
 
   // ==========================================================================
@@ -370,23 +412,26 @@ export class StripeProvider implements PaymentProviderInterface {
     userAddress: string,
     providerMethodId: string
   ): Promise<SavedPaymentMethod> {
-    const stripeMethod = await this.stripe.paymentMethods.retrieve(providerMethodId);
+    const customer = await this.customerFor(userAddress, true);
+    const stripeMethod = await this.stripe.paymentMethods.attach(providerMethodId, { customer: customer.id });
+    return this.toSavedMethod(userAddress, stripeMethod);
+  }
 
-    const method: SavedPaymentMethod = {
-      id: `pm_${randomUUID().replace(/-/g, "")}`,
+  private toSavedMethod(userAddress: string, stripeMethod: Stripe.PaymentMethod): SavedPaymentMethod {
+    return {
+      // Stripe's ID, so the method can be detached by it
+      id: stripeMethod.id,
       userAddress,
       provider: "stripe",
-      providerMethodId,
+      providerMethodId: stripeMethod.id,
       type: stripeMethod.type === "card" ? "card" : "bank_account",
       cardBrand: stripeMethod.card?.brand,
       cardLast4: stripeMethod.card?.last4,
       cardExpMonth: stripeMethod.card?.exp_month,
       cardExpYear: stripeMethod.card?.exp_year,
       isDefault: false,
-      createdAt: Date.now(),
+      createdAt: stripeMethod.created * 1000,
     };
-
-    return method;
   }
 
   async deletePaymentMethod(methodId: string): Promise<void> {
@@ -394,8 +439,11 @@ export class StripeProvider implements PaymentProviderInterface {
   }
 
   async listPaymentMethods(userAddress: string): Promise<SavedPaymentMethod[]> {
-    // Requires a Stripe customer ID — look up by userAddress in production
-    return [];
+    if (!this.config.secretKey) return [];
+    const customer = await this.customerFor(userAddress);
+    if (!customer) return [];
+    const methods = await this.stripe.paymentMethods.list({ customer: customer.id, type: "card" });
+    return methods.data.map((m) => this.toSavedMethod(userAddress, m));
   }
 
   // ==========================================================================

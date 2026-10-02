@@ -327,27 +327,31 @@ router.post("/subscriptions", authMiddleware(), async (req: Request, res: Respon
 });
 
 /**
- * Cancel subscription
- * POST /v1/payments/subscriptions/:subscriptionId/cancel
+ * Cancel, pause or resume a subscription (its backer or an admin)
+ * POST /v1/payments/subscriptions/:subscriptionId/cancel|pause|resume
  */
-// Admin only: the processor cannot yet look up a subscription's owner
-router.post(
-  "/subscriptions/:subscriptionId/cancel",
-  authMiddleware(),
-  requireRole("admin"),
-  async (req: Request, res: Response) => {
-    try {
-      const subscription = await paymentProcessor.cancelSubscription(
-        req.params.subscriptionId
-      );
-      res.json(subscription);
-    } catch (error) {
-      res.status(500).json({
-        error: error instanceof Error ? error.message : "Cancellation failed",
-      });
+for (const action of ["cancel", "pause", "resume"] as const) {
+  router.post(`/subscriptions/:subscriptionId/${action}`, authMiddleware(), async (req: Request, res: Response) => {
+    const subscription = paymentProcessor.getSubscription(req.params.subscriptionId);
+    if (!subscription || (!sameAddress(subscription.backerAddress, req.auth!.address) && !hasRole(req, "admin"))) {
+      return res.status(404).json(errorResponse("SUBSCRIPTION_NOT_FOUND", "Subscription not found"));
     }
-  }
-);
+
+    try {
+      const updated =
+        action === "cancel"
+          ? await paymentProcessor.cancelSubscription(subscription.id, subscription.provider)
+          : action === "pause"
+            ? await paymentProcessor.pauseSubscription(subscription.id, subscription.provider)
+            : await paymentProcessor.resumeSubscription(subscription.id, subscription.provider);
+      res.json(updated);
+    } catch (error) {
+      res.status(400).json(
+        errorResponse("SUBSCRIPTION_UPDATE_FAILED", error instanceof Error ? error.message : `Could not ${action} subscription`)
+      );
+    }
+  });
+}
 
 // ============================================================================
 // PAYMENT METHODS

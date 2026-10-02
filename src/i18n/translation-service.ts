@@ -682,37 +682,7 @@ export class TranslationService {
     count: number,
     locale: SupportedLocale
   ): "zero" | "one" | "two" | "few" | "many" | "other" {
-    const absCount = Math.abs(count);
-
-    // Simplified plural rules (use Intl.PluralRules in production)
-    switch (locale) {
-      case "ar":
-        if (count === 0) return "zero";
-        if (count === 1) return "one";
-        if (count === 2) return "two";
-        if (count % 100 >= 3 && count % 100 <= 10) return "few";
-        if (count % 100 >= 11) return "many";
-        return "other";
-
-      case "ru":
-        if (absCount % 10 === 1 && absCount % 100 !== 11) return "one";
-        if (
-          absCount % 10 >= 2 &&
-          absCount % 10 <= 4 &&
-          (absCount % 100 < 10 || absCount % 100 >= 20)
-        )
-          return "few";
-        return "many";
-
-      case "ja":
-      case "zh":
-      case "zh-TW":
-      case "ko":
-        return "other"; // No plural forms
-
-      default:
-        return count === 1 ? "one" : "other";
-    }
+    return new Intl.PluralRules(locale).select(count);
   }
 
   private interpolate(

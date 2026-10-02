@@ -342,6 +342,15 @@ export class PaymentProcessor {
     return provider.createSubscription(request);
   }
 
+  /** A subscription created through any provider */
+  getSubscription(subscriptionId: string): Subscription | undefined {
+    for (const provider of this.providers.values()) {
+      const found = (provider as { getSubscription?: (id: string) => Subscription | undefined }).getSubscription?.(subscriptionId);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
   async cancelSubscription(
     subscriptionId: string,
     provider: PaymentProvider = "stripe"
