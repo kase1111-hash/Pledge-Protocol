@@ -11,7 +11,7 @@ import { authMiddleware } from "../../security/middleware";
 const router = Router();
 
 // Initialize GDPR service
-const gdprService = createGdprService();
+export const gdprService = createGdprService();
 
 // ============================================================================
 // DATA EXPORT (GDPR Art. 15, 20)

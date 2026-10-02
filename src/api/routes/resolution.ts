@@ -100,6 +100,19 @@ router.post("/schedule", authMiddleware(), requireCampaignOwner, async (req: Req
   }
 });
 
+// Get a campaign's scheduled resolution
+router.get("/schedule/:campaignId", (req: Request, res: Response) => {
+  const deadline = resolutionEngine.getScheduledResolutions().get(req.params.campaignId);
+
+  if (deadline === undefined) {
+    return res.status(404).json({
+      error: { code: "NOT_SCHEDULED", message: "No resolution is scheduled for this campaign" },
+    });
+  }
+
+  res.json({ campaignId: req.params.campaignId, scheduledFor: deadline });
+});
+
 // Cancel scheduled resolution
 router.delete("/schedule/:campaignId", authMiddleware(), requireCampaignOwner, (req: Request, res: Response) => {
   const { campaignId } = req.params;

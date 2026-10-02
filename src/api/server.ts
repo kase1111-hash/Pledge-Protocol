@@ -13,11 +13,9 @@ import { authService } from "../security/auth-service";
 import { ipRateLimiter, userRateLimiter, endpointRateLimiter } from "../security/rate-limiter";
 import { logger } from "../security/audit-logger";
 import { initializeDatabase, closeDatabase } from "../database";
+import { restorePersistentState, flushPersistentState } from "./persistence";
 
 const PORT = env.PORT;
-
-// Start background job queue
-jobQueue.start();
 
 // Schedule automatic resource cleanup
 const FIVE_MINUTES = 5 * 60 * 1000;
@@ -50,6 +48,15 @@ initializeDatabase({
   connectionString: env.DATABASE_URL,
 }).then(async () => {
   await initializeOracles();
+  // Load persisted service state before serving or running background work
+  await restorePersistentState();
+  jobQueue.start();
+
+  // Changes made outside a request (timers, background jobs) are stored here;
+  // request handlers are flushed before they respond
+  const flushInterval = setInterval(() => {
+    flushPersistentState().catch((err) => logger.error("Periodic state flush failed", err));
+  }, 1000);
 
   const server = app.listen(PORT, () => {
     logger.info(`Pledge Protocol API started`, {
@@ -69,11 +76,6 @@ initializeDatabase({
   function shutdown(signal: string) {
     logger.info(`${signal} received, shutting down gracefully`);
 
-    // Stop accepting new connections
-    server.close(() => {
-      logger.info("HTTP server closed");
-    });
-
     // Clear all cleanup intervals
     for (const interval of cleanupIntervals) {
       clearInterval(interval);
@@ -82,11 +84,23 @@ initializeDatabase({
     // Stop background job queue and scheduled resolutions
     jobQueue.stop();
     resolutionEngine.shutdown();
+    clearInterval(flushInterval);
 
-    // Close database connections
-    closeDatabase().catch((err) => {
-      logger.error("Error closing database", err);
+    // Stop accepting connections; once in-flight requests finish, store any
+    // remaining changes and close the database
+    server.close(() => {
+      logger.info("HTTP server closed");
+      flushPersistentState()
+        .catch((err) => logger.error("Final state flush failed", err))
+        .then(() => closeDatabase())
+        .then(() => process.exit(0))
+        .catch((err) => {
+          logger.error("Error closing database", err);
+          process.exit(1);
+        });
     });
+    // Idle keep-alive connections would otherwise hold close() open
+    server.closeIdleConnections();
 
     // Allow in-flight requests to drain (10s timeout)
     setTimeout(() => {

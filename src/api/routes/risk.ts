@@ -11,7 +11,7 @@ import { authMiddleware } from "../../security/middleware";
 const router = Router();
 
 // Initialize fraud detector
-const fraudDetector = createFraudDetector();
+export const fraudDetector = createFraudDetector();
 
 // ============================================================================
 // VERIFICATION

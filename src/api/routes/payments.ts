@@ -120,7 +120,7 @@ function getRequiredEnv(key: string): string {
   return value || "";
 }
 
-const paymentProcessor = createPaymentProcessor({
+export const paymentProcessor = createPaymentProcessor({
   ...DEFAULT_PAYMENT_CONFIG,
   stripe: {
     secretKey: getRequiredEnv("STRIPE_SECRET_KEY"),

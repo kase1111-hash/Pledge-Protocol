@@ -17,6 +17,7 @@ import {
   Pledge,
   PledgeQuery,
   StoreSession,
+  StoredDocument,
 } from "./types";
 
 /**
@@ -62,6 +63,18 @@ export const MIGRATIONS: { version: number; sql: string }[] = [
         oracle_id     TEXT NOT NULL,
         data          JSONB NOT NULL,
         PRIMARY KEY (campaign_id, milestone_id)
+      );
+    `,
+  },
+  {
+    version: 2,
+    sql: `
+      CREATE TABLE document_records (
+        collection  TEXT NOT NULL,
+        id          TEXT NOT NULL,
+        data        JSONB NOT NULL,
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (collection, id)
       );
     `,
   },
@@ -247,6 +260,49 @@ export class PostgresStore extends PostgresSession implements DomainStore {
       const result = await fn(new PostgresSession(client as unknown as Queryable));
       await client.query("COMMIT");
       return result;
+    } catch (error) {
+      await client.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async listDocuments(collection: string): Promise<StoredDocument[]> {
+    const result = await this.pool.query(
+      `SELECT id, data::text AS data FROM document_records WHERE collection = $1`,
+      [collection]
+    );
+    return result.rows.map((r) => ({ id: r.id as string, data: r.data as string }));
+  }
+
+  async writeDocuments(collection: string, puts: StoredDocument[], deletes: string[]): Promise<void> {
+    if (puts.length === 0 && deletes.length === 0) return;
+
+    const client = await this.pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (deletes.length > 0) {
+        await client.query(
+          `DELETE FROM document_records WHERE collection = $1 AND id = ANY($2::text[])`,
+          [collection, deletes]
+        );
+      }
+      // Batched upsert: one statement per chunk keeps large flushes fast
+      for (let i = 0; i < puts.length; i += 500) {
+        const chunk = puts.slice(i, i + 500);
+        const values: unknown[] = [collection];
+        const rows = chunk.map((doc) => {
+          values.push(doc.id, doc.data);
+          return `($1, $${values.length - 1}, $${values.length}::jsonb, NOW())`;
+        });
+        await client.query(
+          `INSERT INTO document_records (collection, id, data, updated_at) VALUES ${rows.join(", ")}
+           ON CONFLICT (collection, id) DO UPDATE SET data = EXCLUDED.data, updated_at = NOW()`,
+          values
+        );
+      }
+      await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       throw error;

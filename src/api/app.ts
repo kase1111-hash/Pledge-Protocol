@@ -30,6 +30,7 @@ import reportRoutes from "./routes/reports";
 import integrationRoutes from "./routes/integrations";
 import i18nRoutes from "./routes/i18n";
 import campaignsAdvancedRoutes from "./routes/campaigns-advanced";
+import { persistBeforeResponse, registerPersistentState } from "./persistence";
 
 // Phase 7: Security middleware
 import {
@@ -43,6 +44,13 @@ import {
 } from "../security/middleware";
 
 const app: Express = express();
+
+registerPersistentState();
+
+// Amounts are bigints in several services; JSON.stringify throws on them
+app.set("json replacer", (_key: string, value: unknown) =>
+  typeof value === "bigint" ? value.toString() : value
+);
 
 // ============================================================================
 // PHASE 7: SECURITY MIDDLEWARE
@@ -80,6 +88,9 @@ app.use(
 
 // Request logging
 app.use(requestLoggerMiddleware);
+
+// Store state changes before answering requests that make them
+app.use(persistBeforeResponse);
 
 // Rate limiting (applies to all routes)
 app.use(rateLimitMiddleware());

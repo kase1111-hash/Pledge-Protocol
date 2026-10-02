@@ -27,7 +27,6 @@ export class NotificationService {
   private notifications: Map<string, Notification> = new Map();
   private deliveryLogs: Map<string, WebhookDeliveryLog[]> = new Map();
   private preferences: Map<string, NotificationPreferences> = new Map();
-  private eventQueue: NotificationEvent[] = [];
 
   // =========================================================================
   // Webhook Management
@@ -157,8 +156,6 @@ export class NotificationService {
       id: this.generateId("event"),
       timestamp: Date.now(),
     };
-
-    this.eventQueue.push(fullEvent);
 
     // Process webhooks for this event
     await this.processWebhooks(fullEvent);

@@ -206,10 +206,23 @@ export interface StoreSession {
   insertAttestation(attestation: Attestation): Promise<boolean>;
 }
 
+/**
+ * A JSON document in a named collection. Used for service state that has no
+ * dedicated table (see collections.ts).
+ */
+export interface StoredDocument {
+  id: string;
+  /** JSON text */
+  data: string;
+}
+
 export interface DomainStore extends StoreSession {
   readonly kind: "memory" | "postgresql";
   /** Runs fn atomically: all writes commit together or not at all */
   transaction<T>(fn: (session: StoreSession) => Promise<T>): Promise<T>;
+  listDocuments(collection: string): Promise<StoredDocument[]>;
+  /** Upserts and deletes documents of one collection atomically */
+  writeDocuments(collection: string, puts: StoredDocument[], deletes: string[]): Promise<void>;
   isConnected(): Promise<boolean>;
   close(): Promise<void>;
 }

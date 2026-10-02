@@ -11,7 +11,7 @@ import { authMiddleware } from "../../security/middleware";
 const router = Router();
 
 // Initialize organization service
-const orgService = createOrganizationService();
+export const orgService = createOrganizationService();
 
 // ============================================================================
 // ORGANIZATIONS

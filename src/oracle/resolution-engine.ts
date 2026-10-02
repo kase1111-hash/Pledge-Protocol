@@ -9,6 +9,9 @@ import {
   ResolutionRefusalCode,
 } from "./types";
 
+/** Longest delay setTimeout supports (2^31 - 1 ms) */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
 /**
  * Resolution was refused because of the campaign's current state (as opposed
  * to an unexpected failure)
@@ -115,6 +118,8 @@ export interface ResolutionOutcome {
 export class ResolutionEngine extends EventEmitter {
   private jobs: Map<string, ResolutionJob> = new Map();
   private scheduledResolutions: Map<string, NodeJS.Timeout> = new Map();
+  /** Schedules as data (campaign ID -> deadline), so they can be persisted */
+  private scheduledDeadlines: Map<string, number> = new Map();
 
   constructor(
     private oracleRouter: OracleRouter,
@@ -749,18 +754,46 @@ export class ResolutionEngine extends EventEmitter {
    * Schedule automatic resolution at deadline
    */
   scheduleResolution(campaignId: string, deadline: number): void {
+    this.cancelScheduledResolution(campaignId);
+    this.scheduledDeadlines.set(campaignId, deadline);
+    this.armTimer(campaignId, deadline);
+  }
+
+  /**
+   * Re-arm timers for every recorded schedule, e.g. after scheduledDeadlines
+   * was reloaded from storage at startup. Overdue ones run immediately.
+   */
+  restoreScheduledResolutions(): void {
+    for (const [campaignId, deadline] of this.scheduledDeadlines.entries()) {
+      if (!this.scheduledResolutions.has(campaignId)) {
+        this.armTimer(campaignId, deadline);
+      }
+    }
+  }
+
+  /** Recorded schedules: campaign ID -> deadline (unix seconds) */
+  getScheduledResolutions(): Map<string, number> {
+    return new Map(this.scheduledDeadlines.entries());
+  }
+
+  private armTimer(campaignId: string, deadline: number): void {
     const delay = deadline * 1000 - Date.now();
 
     if (delay <= 0) {
       // Deadline already passed
+      this.scheduledResolutions.delete(campaignId);
+      this.scheduledDeadlines.delete(campaignId);
       this.triggerResolution(campaignId, "schedule");
       return;
     }
 
+    // setTimeout cannot wait longer than ~24.8 days (it fires immediately
+    // instead), so long delays are covered by a chain of shorter timers
     const timer = setTimeout(() => {
-      this.triggerResolution(campaignId, "schedule");
       this.scheduledResolutions.delete(campaignId);
-    }, delay);
+      this.armTimer(campaignId, deadline);
+    }, Math.min(delay, MAX_TIMER_DELAY_MS));
+    timer.unref?.();
 
     this.scheduledResolutions.set(campaignId, timer);
   }
@@ -774,6 +807,7 @@ export class ResolutionEngine extends EventEmitter {
       clearTimeout(timer);
       this.scheduledResolutions.delete(campaignId);
     }
+    this.scheduledDeadlines.delete(campaignId);
   }
 
   /**
@@ -842,7 +876,7 @@ export class ResolutionEngine extends EventEmitter {
    * Shutdown the engine
    */
   shutdown(): void {
-    // Clear all scheduled resolutions
+    // Stop the timers; scheduledDeadlines is kept so schedules can be restored
     for (const timer of this.scheduledResolutions.values()) {
       clearTimeout(timer);
     }

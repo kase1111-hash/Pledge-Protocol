@@ -17,6 +17,7 @@ import {
   Pledge,
   PledgeQuery,
   StoreSession,
+  StoredDocument,
 } from "./types";
 
 function copy<T>(value: T): T {
@@ -132,6 +133,9 @@ export class MemoryStore implements DomainStore {
   /** Committed data. Replaced wholesale when a transaction commits. */
   private tables: Tables = emptyTables();
 
+  /** collection -> id -> JSON text */
+  private documents: Map<string, Map<string, string>> = new Map();
+
   /** Tail of the write queue; each transaction waits for the previous one */
   private queue: Promise<unknown> = Promise.resolve();
 
@@ -201,6 +205,20 @@ export class MemoryStore implements DomainStore {
     return result;
   }
 
+  async listDocuments(collection: string): Promise<StoredDocument[]> {
+    return Array.from(this.documents.get(collection) ?? [], ([id, data]) => ({ id, data }));
+  }
+
+  async writeDocuments(collection: string, puts: StoredDocument[], deletes: string[]): Promise<void> {
+    let docs = this.documents.get(collection);
+    if (!docs) {
+      docs = new Map();
+      this.documents.set(collection, docs);
+    }
+    for (const id of deletes) docs.delete(id);
+    for (const doc of puts) docs.set(doc.id, doc.data);
+  }
+
   async isConnected(): Promise<boolean> {
     return true;
   }
@@ -212,5 +230,6 @@ export class MemoryStore implements DomainStore {
   /** Remove all data (tests) */
   clear(): void {
     this.tables = emptyTables();
+    this.documents.clear();
   }
 }

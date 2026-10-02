@@ -572,6 +572,14 @@ for (const backend of storeBackends("api_integration_test")) {
         expect(response.body.data.raisedBy.toLowerCase()).toBe(backer.address.toLowerCase());
       });
 
+      it("updates the signed-in user's social profile", async () => {
+        // The profile carries bigint stats, which used to make this endpoint fail
+        const response = await as(sessions.backer).put("/v1/social/users/me", { displayName: "Runner" });
+
+        expect(response.status).toBe(200);
+        expect(response.body.data.displayName).toBe("Runner");
+      });
+
       it("only updates locale preferences for the signed-in account", async () => {
         const path = (a: string) => `/v1/i18n/preferences/${a}`;
         expect((await as(sessions.backer).put(path(stranger.address), { locale: "fr" })).status).toBe(403);

@@ -61,7 +61,8 @@ export class SocialService {
   private profiles: Map<string, UserProfile> = new Map();
   private follows: Map<string, Follow> = new Map();
   private comments: Map<string, Comment> = new Map();
-  private activities: Activity[] = [];
+  /** Activity ID -> activity, in insertion (chronological) order */
+  private activities: Map<string, Activity> = new Map();
   private badges: Map<string, Badge> = new Map();
 
   // ============================================================================
@@ -552,11 +553,12 @@ export class SocialService {
       ...params,
     };
 
-    this.activities.push(activity);
+    this.activities.set(activity.id, activity);
 
-    // Keep only last 100000 activities
-    if (this.activities.length > 100000) {
-      this.activities = this.activities.slice(-100000);
+    // Keep only the last 100000 activities (Maps iterate oldest first)
+    for (const id of this.activities.keys()) {
+      if (this.activities.size <= 100000) break;
+      this.activities.delete(id);
     }
 
     return activity;
@@ -589,7 +591,7 @@ export class SocialService {
     followingAddresses.push(normalizedAddress);
 
     // Get activities from followed users
-    return this.activities
+    return Array.from(this.activities.values())
       .filter(
         (a) =>
           followingAddresses.includes(a.actor) &&
@@ -604,7 +606,7 @@ export class SocialService {
    * Get global activity feed
    */
   getGlobalFeed(limit: number = 50): Activity[] {
-    return this.activities
+    return Array.from(this.activities.values())
       .filter((a) => a.visibility === "public")
       .sort((a, b) => b.timestamp - a.timestamp)
       .slice(0, limit);
@@ -614,7 +616,7 @@ export class SocialService {
    * Filter activities
    */
   private filterActivities(options?: ActivityFilterOptions): Activity[] {
-    let activities = this.activities;
+    let activities = Array.from(this.activities.values());
 
     if (options?.actor) {
       activities = activities.filter((a) => a.actor === options.actor);
@@ -788,7 +790,7 @@ export class SocialService {
       totalProfiles: this.profiles.size,
       totalFollows: this.follows.size,
       totalComments: this.comments.size,
-      totalActivities: this.activities.length,
+      totalActivities: this.activities.size,
       verifiedProfiles: Array.from(this.profiles.values()).filter((p) => p.verified).length,
     };
   }

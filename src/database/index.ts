@@ -12,3 +12,4 @@ export * from "./types";
 export * from "./memory-store";
 export * from "./postgres-store";
 export * from "./database-service";
+export * from "./collections";
