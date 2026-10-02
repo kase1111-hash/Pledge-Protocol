@@ -1233,6 +1233,6 @@ export function configFromEnv(env: NodeJS.ProcessEnv = process.env): {
           fromNumber: env.TWILIO_FROM_NUMBER || "",
         }
       : undefined,
-    baseUrl: env.APP_URL || env.BASE_URL || "https://app.pledgeprotocol.io",
+    baseUrl: env.APP_URL || "https://app.pledgeprotocol.io",
   };
 }

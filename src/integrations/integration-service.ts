@@ -1036,5 +1036,5 @@ export function createIntegrationService(config: {
 
 // Default instance
 export const integrationService = new IntegrationService({
-  baseUrl: process.env.BASE_URL || "https://app.pledgeprotocol.io",
+  baseUrl: /^https?:\/\//.test(process.env.BASE_URL ?? "") ? process.env.BASE_URL! : "https://app.pledgeprotocol.io",
 });

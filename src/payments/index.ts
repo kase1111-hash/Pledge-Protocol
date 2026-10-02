@@ -29,3 +29,5 @@ export {
   createPaymentProcessor,
   DEFAULT_PAYMENT_CONFIG,
 } from "./payment-processor";
+
+export { PriceFeed, priceFeed, PriceSource } from "./price-feed";

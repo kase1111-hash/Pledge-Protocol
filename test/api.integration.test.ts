@@ -701,6 +701,69 @@ for (const backend of storeBackends("api_integration_test")) {
         expect(updated.body.status).not.toBe("suspended");
       });
 
+      it("runs organization bulk operations against real campaigns", async () => {
+        const created = await as(sessions.creator).post("/v1/enterprise/orgs", {
+          name: `Bulk ${Date.now()}`,
+          type: "nonprofit",
+          contactEmail: "org@example.com",
+        });
+        const path = (suffix = "") => `/v1/enterprise/orgs/${created.body.id}${suffix}`;
+        await as(sessions.creator).post(path("/members"), { userAddress: backer.address, role: "viewer" });
+
+        const start = now();
+        const definition = (name: string) => ({
+          name,
+          description: "Bulk created",
+          beneficiary: creator.address,
+          beneficiaryName: "Charity",
+          pledgeWindowStart: start,
+          pledgeWindowEnd: start + HOUR,
+          resolutionDeadline: start + 24 * HOUR,
+          milestones: [{
+            name: "Finish", description: "Finish", oracleId: attestationOracleId,
+            condition: { type: "completion", field: "completed", operator: "eq", value: true },
+            releasePercentage: 100,
+          }],
+          pledgeTypes: [{ name: "Pledge", description: "Pledge", calculationType: "flat", minimum: "100" }],
+          minimumPledge: "100",
+        });
+
+        const waitFor = async (operationId: string) => {
+          for (let i = 0; i < 50; i++) {
+            const op = await as(sessions.creator).get(path(`/bulk/${operationId}`));
+            if (!["pending", "processing"].includes(op.body.status)) return op.body;
+            await new Promise((r) => setTimeout(r, 10));
+          }
+          throw new Error("bulk operation did not finish");
+        };
+
+        // Viewers may not create campaigns in bulk; unsupported types are refused
+        expect((await as(sessions.backer).post(path("/bulk"), { type: "campaign_create", inputData: [definition("x")] })).status).toBe(403);
+        expect((await as(sessions.creator).post(path("/bulk"), { type: "pledge_refund", inputData: [{}] })).status).toBe(400);
+
+        const createOp = await as(sessions.creator).post(path("/bulk"), {
+          type: "campaign_create",
+          inputData: [definition("Bulk A"), { ...definition("Bulk B"), pledgeWindowEnd: start - 1 }],
+        });
+        expect(createOp.status).toBe(202);
+        const done = await waitFor(createOp.body.id);
+        expect(done).toMatchObject({ status: "partial", successCount: 1, failureCount: 1 });
+        expect(done.errors[0]).toMatchObject({ itemIndex: 1, error: "Pledge window start must be before end" });
+
+        const campaignId = done.results[0].itemId;
+        const stored = await as(null).get(`/v1/campaigns/${campaignId}`);
+        expect(stored.body).toMatchObject({ name: "Bulk A", status: "draft" });
+        expect(stored.body.creator.toLowerCase()).toBe(creator.address.toLowerCase());
+
+        const cancelOp = await as(sessions.creator).post(path("/bulk"), {
+          type: "campaign_cancel",
+          inputData: [{ campaignId }, { campaignId: "campaign_missing" }],
+        });
+        const cancelled = await waitFor(cancelOp.body.id);
+        expect(cancelled).toMatchObject({ status: "partial", successCount: 1 });
+        expect((await as(null).get(`/v1/campaigns/${campaignId}`)).body.status).toBe("cancelled");
+      });
+
       it("keeps financial reports private and reaches the scheduled list", async () => {
         expect((await as(sessions.stranger).get(`/v1/reports/financial/${backer.address}`)).status).toBe(403);
         expect((await as(sessions.backer).get(`/v1/reports/financial/${backer.address}`)).status).toBe(200);

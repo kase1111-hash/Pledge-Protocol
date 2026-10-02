@@ -19,8 +19,10 @@ export {
   StorageService,
   BatchUploader,
   storageService,
-  batchUploader
+  batchUploader,
+  storageConfigFromEnv
 } from "./storage";
+export { createDataItem, verifyDataItem, deepHash } from "./ans104";
 
 // Services
 export {

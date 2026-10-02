@@ -410,6 +410,8 @@ export interface BulkOperation {
 
   // Results
   resultFile?: string;
+  /** What each successful item produced (e.g. the created campaign's ID) */
+  results?: BulkOperationResult[];
 
   // Timing
   createdAt: number;
@@ -418,6 +420,17 @@ export interface BulkOperation {
 
   createdBy: string;
 }
+
+export interface BulkOperationResult {
+  itemIndex: number;
+  itemId?: string;
+}
+
+/**
+ * Carries out one item of a bulk operation; returns the ID of what it
+ * created or changed
+ */
+export type BulkOperationHandler = (item: any, createdBy: string) => Promise<{ id?: string } | void>;
 
 export interface BulkOperationError {
   itemIndex: number;

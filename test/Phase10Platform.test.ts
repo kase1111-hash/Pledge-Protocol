@@ -4,7 +4,8 @@
  * Tests for notifications, i18n, reporting, integrations, and advanced campaigns.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, beforeAll } from "vitest";
+import { priceFeed } from "../src/payments/price-feed";
 
 // Notifications
 import {
@@ -304,16 +305,30 @@ describe("TranslationService", () => {
       expect(currencies.find((c) => c.code === "USDC")).toBeDefined();
     });
 
-    it("should get exchange rate", () => {
-      const rate = service.getExchangeRate("EUR", "USD");
-      expect(rate).not.toBeNull();
-      expect(rate?.rate).toBeGreaterThan(0);
+    beforeAll(() => {
+      priceFeed.useSource(async () => ({ EUR: 1.1, ETH: 2500, USDC: 1 }));
     });
 
-    it("should convert currency", () => {
-      const result = service.convertCurrency(100, "EUR", "USD");
-      expect(result.amount).toBeGreaterThan(0);
-      expect(result.rate).toBeGreaterThan(0);
+    it("should get the market exchange rate", async () => {
+      const rate = await service.getExchangeRate("EUR", "USD");
+      expect(rate?.rate).toBeCloseTo(1.1);
+      expect(rate?.source).toBe("coingecko");
+      expect((await service.getExchangeRate("ETH", "EUR"))?.rate).toBeCloseTo(2500 / 1.1);
+    });
+
+    it("should convert currency", async () => {
+      const result = await service.convertCurrency(100, "EUR", "USD");
+      expect(result.amount).toBeCloseTo(110);
+      expect(result.rate).toBeCloseTo(1.1);
+    });
+
+    it("should report no rate when prices are unavailable", async () => {
+      priceFeed.useSource(async () => {
+        throw new Error("offline");
+      });
+      expect(await service.getExchangeRate("EUR", "USD")).toBeNull();
+      await expect(service.convertCurrency(1, "EUR", "USD")).rejects.toThrow(/no exchange rate/);
+      priceFeed.useSource(async () => ({ EUR: 1.1, ETH: 2500, USDC: 1 }));
     });
   });
 

@@ -5,7 +5,7 @@
 
 export type TemplateType = "race_finish" | "academic" | "creative" | "generic";
 
-export type StorageProvider = "ipfs" | "arweave";
+export type StorageProvider = "ipfs" | "arweave" | "local";
 
 export interface CommemorativeData {
   pledgeId: string;
@@ -122,16 +122,26 @@ export interface IPFSConfig {
   apiEndpoint: string;
   apiKey?: string;
   apiSecret?: string;
+  /** Pinata JWT, instead of key and secret */
+  jwt?: string;
 }
 
 export interface ArweaveConfig {
   gateway: string;
-  wallet?: any; // JWK wallet
+  /** Arweave wallet (RSA private key as JWK) */
+  wallet?: import("crypto").JsonWebKey;
+  /** Irys/Bundlr node */
   bundlrEndpoint?: string;
+}
+
+export interface LocalStorageConfig {
+  /** Public URL of this API, for links to locally stored assets */
+  publicUrl: string;
 }
 
 export interface StorageConfig {
   ipfs: IPFSConfig;
   arweave: ArweaveConfig;
+  local: LocalStorageConfig;
   preferredProvider: StorageProvider;
 }

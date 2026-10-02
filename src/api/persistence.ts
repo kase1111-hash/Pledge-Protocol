@@ -12,7 +12,7 @@ import { getStore, persistence, DomainStore } from "../database";
 import { authService } from "../security/auth-service";
 import { logger } from "../security/audit-logger";
 import { disputeService } from "../governance";
-import { commemorativeService, pledgeTokenService } from "../tokens";
+import { commemorativeService, pledgeTokenService, storageService } from "../tokens";
 import { socialService } from "../social";
 import { notificationService } from "../notifications";
 import { notificationService as notificationServiceV2 } from "../notifications-v2";
@@ -60,6 +60,7 @@ export function registerPersistentState(): void {
     "recordsByBacker",
   ]);
   bindMaps("pledgeTokens", pledgeTokenService, ["pledgeMetadata"]);
+  bindMaps("storage", storageService, ["localAssets", "uploadCache"]);
 
   bindMaps("social", socialService, ["profiles", "follows", "comments", "activities", "badges"]);
 

@@ -16,6 +16,7 @@ import {
   PaymentCurrency,
 } from "./types";
 import { ChainId } from "../multichain/config";
+import { PriceFeed, priceFeed } from "./price-feed";
 
 // ============================================================================
 // TYPES
@@ -53,6 +54,9 @@ export interface SettlementBatch {
   processedAt?: number;
 }
 
+/** Oldest market rate a settlement may be priced at */
+const RATE_MAX_AGE_MS = 10 * 60 * 1000;
+
 // Minimal ERC20 ABI for transfers
 const ERC20_ABI = [
   "function transfer(address to, uint256 amount) returns (bool)",
@@ -73,9 +77,11 @@ export class SettlementService {
   private pendingSettlements: Settlement[] = [];
   private providers: Map<number, JsonRpcProvider> = new Map();
 
-  constructor(config: SettlementConfig) {
+  private priceFeed: PriceFeed;
+
+  constructor(config: SettlementConfig, feed: PriceFeed = priceFeed) {
     this.config = config;
-    this.initializeExchangeRates();
+    this.priceFeed = feed;
     this.initializeProviders();
   }
 
@@ -109,73 +115,25 @@ export class SettlementService {
   // EXCHANGE RATES
   // ==========================================================================
 
-  private initializeExchangeRates(): void {
-    const now = Date.now();
-    const validFor = 5 * 60 * 1000; // 5 minutes
-
-    // Default rates — in production, fetch from CoinGecko/Chainlink
-    const rates: ExchangeRate[] = [
-      {
-        fromCurrency: "USD",
-        toCurrency: "USDC",
-        rate: "1.000000",
-        source: "default",
-        timestamp: now,
-        validUntil: now + validFor,
-      },
-      {
-        fromCurrency: "USD",
-        toCurrency: "USDT",
-        rate: "1.000000",
-        source: "default",
-        timestamp: now,
-        validUntil: now + validFor,
-      },
-      {
-        fromCurrency: "EUR",
-        toCurrency: "USDC",
-        rate: "1.085000",
-        source: "default",
-        timestamp: now,
-        validUntil: now + validFor,
-      },
-      {
-        fromCurrency: "GBP",
-        toCurrency: "USDC",
-        rate: "1.270000",
-        source: "default",
-        timestamp: now,
-        validUntil: now + validFor,
-      },
-    ];
-
-    for (const rate of rates) {
-      const key = `${rate.fromCurrency}-${rate.toCurrency}`;
-      this.exchangeRates.set(key, rate);
-    }
-  }
-
-  getExchangeRate(
+  /**
+   * Market rate from the price feed. Settlements are only priced on rates
+   * at most ten minutes old; there is no fallback rate.
+   */
+  async getExchangeRate(
     from: PaymentCurrency,
     to: "USDC" | "USDT" | "ETH"
-  ): ExchangeRate | undefined {
-    const key = `${from}-${to}`;
-    const rate = this.exchangeRates.get(key);
-
-    // Check if rate is still valid
-    if (rate && rate.validUntil < Date.now()) {
-      // Refresh rates (in production: fetch from API)
-      this.initializeExchangeRates();
-      return this.exchangeRates.get(key);
-    }
-
-    return rate;
-  }
-
-  async refreshExchangeRates(): Promise<void> {
-    // In production: fetch real-time rates from CoinGecko, Chainlink, etc.
-    // For now, reinitialize with defaults
-    this.initializeExchangeRates();
+  ): Promise<ExchangeRate> {
+    const { rate, fetchedAt } = await this.priceFeed.rate(from, to, RATE_MAX_AGE_MS);
+    const exchangeRate: ExchangeRate = {
+      fromCurrency: from,
+      toCurrency: to,
+      rate: rate.toFixed(6),
+      source: "coingecko",
+      timestamp: fetchedAt,
+      validUntil: fetchedAt + RATE_MAX_AGE_MS,
+    };
+    this.exchangeRates.set(`${from}-${to}`, exchangeRate);
+    return exchangeRate;
   }
 
   // ==========================================================================
@@ -193,12 +151,7 @@ export class SettlementService {
     const destChainId = request.destinationChainId || this.config.defaultChainId;
 
     // Get exchange rate
-    const rate = this.getExchangeRate(session.currency, destCurrency);
-    if (!rate) {
-      throw new Error(
-        `No exchange rate for ${session.currency} -> ${destCurrency}`
-      );
-    }
+    const rate = await this.getExchangeRate(session.currency, destCurrency);
 
     // Calculate destination amount
     // Source amount is in cents, convert to USDC (6 decimals)
@@ -401,6 +354,13 @@ export class SettlementService {
   // REVERSAL
   // ==========================================================================
 
+  /**
+   * Settled funds sit in the escrow contract, which only returns them through
+   * its own refund paths (pledge cancellation, campaign cancellation or a
+   * failed resolution). Marking a settlement reversed here would not move any
+   * money, so this refuses rather than recording a reversal that did not
+   * happen.
+   */
   async reverseSettlement(settlementId: string): Promise<Settlement> {
     const settlement = this.settlements.get(settlementId);
     if (!settlement) {
@@ -411,11 +371,11 @@ export class SettlementService {
       throw new Error("Can only reverse settled settlements");
     }
 
-    // In production: execute on-chain reversal transaction
-    // This would call a refund function on the escrow contract
-    settlement.status = "reversed";
-    return settlement;
+    throw new Error(
+      "Settled funds are held in escrow; refund them by cancelling the pledge or campaign, which returns them on-chain"
+    );
   }
+
 
   // ==========================================================================
   // ANALYTICS

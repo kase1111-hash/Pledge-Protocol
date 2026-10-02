@@ -198,44 +198,61 @@ function validationError(res: Response, message: string) {
   return res.status(422).json({ error: { code: "VALIDATION_ERROR", message } });
 }
 
-// Create campaign
-router.post("/", authMiddleware(), asyncHandler(async (req: Request, res: Response) => {
-  const parsed = createCampaignSchema.safeParse(req.body);
+/**
+ * A refusal to create or change a campaign, with the HTTP status and error
+ * code the API answers with
+ */
+export class CampaignActionError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string,
+    public readonly details?: unknown
+  ) {
+    super(message);
+    this.name = "CampaignActionError";
+  }
+}
+
+function invalid(message: string): never {
+  throw new CampaignActionError(422, "VALIDATION_ERROR", message);
+}
+
+/**
+ * Validate a campaign definition and store it as a draft created by
+ * `creator`. Used by POST /campaigns and organization bulk operations.
+ */
+export async function createCampaignFrom(input: unknown, creator: string): Promise<Campaign> {
+  const parsed = createCampaignSchema.safeParse(input);
   if (!parsed.success) {
-    return res.status(400).json({
-      error: {
-        code: "INVALID_REQUEST",
-        message: "Invalid request body",
-        details: parsed.error.errors,
-      },
-    });
+    throw new CampaignActionError(400, "INVALID_REQUEST", "Invalid request body", parsed.error.errors);
   }
   const body = parsed.data;
 
   // Validate timeline
   if (body.pledgeWindowStart >= body.pledgeWindowEnd) {
-    return validationError(res, "Pledge window start must be before end");
+    invalid("Pledge window start must be before end");
   }
 
   if (body.pledgeWindowEnd >= body.resolutionDeadline) {
-    return validationError(res, "Resolution deadline must be after pledge window");
+    invalid("Resolution deadline must be after pledge window");
   }
 
   // Validate milestone percentages sum to 100
   const totalPercentage = body.milestones.reduce((sum, m) => sum + m.releasePercentage, 0);
   if (totalPercentage !== 100) {
-    return validationError(res, "Milestone release percentages must sum to 100");
+    invalid("Milestone release percentages must sum to 100");
   }
 
   if (body.maximumPledge && BigInt(body.maximumPledge) < BigInt(body.minimumPledge)) {
-    return validationError(res, "maximumPledge must not be less than minimumPledge");
+    invalid("maximumPledge must not be less than minimumPledge");
   }
 
   // Milestones must be verifiable by a registered, active oracle
   for (const milestone of body.milestones) {
     const oracle = await getStore().getOracle(milestone.oracleId);
     if (!oracle || !oracle.active) {
-      return validationError(res, `Milestone "${milestone.name}" uses unknown or inactive oracle ${milestone.oracleId}`);
+      invalid(`Milestone "${milestone.name}" uses unknown or inactive oracle ${milestone.oracleId}`);
     }
   }
 
@@ -243,7 +260,7 @@ router.post("/", authMiddleware(), asyncHandler(async (req: Request, res: Respon
   for (const pledgeType of body.pledgeTypes) {
     const validation = validatePledgeTypeConfig(pledgeType);
     if (!validation.valid) {
-      return validationError(res, validation.error!);
+      invalid(validation.error!);
     }
   }
 
@@ -255,7 +272,7 @@ router.post("/", authMiddleware(), asyncHandler(async (req: Request, res: Respon
     chainId: null,
     name: body.name,
     description: body.description,
-    creator: req.auth!.address,
+    creator,
     beneficiary: body.beneficiary,
     beneficiaryName: body.beneficiaryName,
     subject: body.subject || null,
@@ -299,8 +316,24 @@ router.post("/", authMiddleware(), asyncHandler(async (req: Request, res: Respon
 
   await getStore().saveCampaign(campaign);
   campaignEvent("campaign_created", campaign);
+  return campaign;
+}
 
-  res.status(201).json(campaign);
+function sendActionError(res: Response, error: unknown): boolean {
+  if (!(error instanceof CampaignActionError)) return false;
+  res.status(error.status).json({
+    error: { code: error.code, message: error.message, ...(error.details ? { details: error.details } : {}) },
+  });
+  return true;
+}
+
+// Create campaign
+router.post("/", authMiddleware(), asyncHandler(async (req: Request, res: Response) => {
+  try {
+    res.status(201).json(await createCampaignFrom(req.body, req.auth!.address));
+  } catch (error) {
+    if (!sendActionError(res, error)) throw error;
+  }
 }));
 
 // Get campaign
@@ -397,21 +430,27 @@ router.post("/:id/activate", authMiddleware(), asyncHandler(async (req: Request,
   result();
 }));
 
-// Cancel campaign: refunds every active pledge (mirrors CampaignRegistry.cancelCampaign)
-router.post("/:id/cancel", authMiddleware(), asyncHandler(async (req: Request, res: Response) => {
-  const result = await getStore().transaction(async (tx) => {
-    const campaign = await tx.getCampaign(req.params.id, { forUpdate: true });
+/**
+ * Cancel a draft or active campaign, refunding every active pledge (mirrors
+ * CampaignRegistry.cancelCampaign). Only the creator may cancel.
+ */
+export async function cancelCampaignAs(
+  id: string,
+  actor: string
+): Promise<{ campaign: Campaign; pledgesRefunded: number; totalRefunded: bigint }> {
+  const outcome = await getStore().transaction(async (tx) => {
+    const campaign = await tx.getCampaign(id, { forUpdate: true });
 
     if (!campaign) {
-      return () => campaignNotFound(res, req.params.id);
+      throw new CampaignActionError(404, "CAMPAIGN_NOT_FOUND", `Campaign with ID ${id} does not exist`);
     }
 
-    if (!sameAddress(campaign.creator, req.auth!.address)) {
-      return () => forbidden(res, "Only the campaign creator can cancel this campaign");
+    if (!sameAddress(campaign.creator, actor)) {
+      throw new CampaignActionError(403, "FORBIDDEN", "Only the campaign creator can cancel this campaign");
     }
 
     if (campaign.status !== "draft" && campaign.status !== "active") {
-      return () => conflict(res, "Only draft or active campaigns can be cancelled");
+      throw new CampaignActionError(409, "CONFLICT", "Only draft or active campaigns can be cancelled");
     }
 
     const timestamp = now();
@@ -435,18 +474,26 @@ router.post("/:id/cancel", authMiddleware(), asyncHandler(async (req: Request, r
     campaign.updatedAt = timestamp;
     await tx.saveCampaign(campaign);
 
-    return () => {
-      campaignEvent("campaign_cancelled", campaign);
-      res.json({
-        id: campaign.id,
-        status: campaign.status,
-        pledgesRefunded: active.items.length,
-        totalRefunded: refunded.toString(),
-      });
-    };
+    return { campaign, pledgesRefunded: active.items.length, totalRefunded: refunded };
   });
 
-  result();
+  campaignEvent("campaign_cancelled", outcome.campaign);
+  return outcome;
+}
+
+// Cancel campaign
+router.post("/:id/cancel", authMiddleware(), asyncHandler(async (req: Request, res: Response) => {
+  try {
+    const { campaign, pledgesRefunded, totalRefunded } = await cancelCampaignAs(req.params.id, req.auth!.address);
+    res.json({
+      id: campaign.id,
+      status: campaign.status,
+      pledgesRefunded,
+      totalRefunded: totalRefunded.toString(),
+    });
+  } catch (error) {
+    if (!sendActionError(res, error)) throw error;
+  }
 }));
 
 // Check a milestone against its (non-attestation) oracle and record a pass.

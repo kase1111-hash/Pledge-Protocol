@@ -238,7 +238,11 @@ NODE_ENV=production npm run api:start
 - **Events.** Campaign, pledge, milestone, resolution and dispute changes are published to subscribed webhooks, integrations and in-app notifications after they are stored. Events about campaigns that are not public only reach the creator's subscriptions.
 - **Outbound requests.** Webhooks, integrations and API oracle endpoints are only called on public addresses (checked after DNS resolution, no redirects); set `ALLOW_PRIVATE_WEBHOOK_TARGETS=true` for local development.
 - **Integrations** that use OAuth need the provider's client credentials (`SLACK_CLIENT_ID`/`SLACK_CLIENT_SECRET`, `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`) and `BASE_URL`, the public URL of this API, for the OAuth callback.
-- **Background work.** Scheduled resolutions, scheduled reports, scheduled campaign actions (launch, close, reminders, milestone checks) and confirmed data deletions run inside the API process.
+- **Notifications** go out through SendGrid or Mailgun (email), Firebase or OneSignal (push) and Twilio (SMS); a channel without credentials fails with an explanatory error rather than pretending to deliver.
+- **Exchange rates** come from CoinGecko. Fiat settlements are refused when no rate from the last ten minutes is available; displayed conversions accept rates up to a day old.
+- **Commemorative storage** uses Pinata (IPFS) or an Irys/Bundlr node (Arweave, signed ANS-104 data items) when configured; otherwise the API keeps the files itself and serves them from `/v1/commemoratives/assets/:hash`.
+- **Organization bulk operations** support `campaign_create`, `campaign_cancel`, `member_invite` and `member_remove`; campaign items go through the same validation and escrow refunds as the campaign routes and need the matching team permission.
+- **Background work.** Scheduled resolutions, scheduled reports, scheduled campaign actions (launch, close, reminders, milestone checks), queued notifications and digests, and confirmed data deletions run inside the API process.
 
 See `.env.example` for every setting.
 

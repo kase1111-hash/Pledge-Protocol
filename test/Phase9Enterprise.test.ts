@@ -17,6 +17,7 @@ import {
   SettlementService,
   DEFAULT_PAYMENT_CONFIG,
   DEFAULT_SETTLEMENT_CONFIG,
+  PriceFeed,
 } from "../src/payments";
 
 // Compliance
@@ -193,13 +194,33 @@ describe("Phase 9: Enterprise Readiness", () => {
       let settlement: SettlementService;
 
       beforeEach(() => {
-        settlement = new SettlementService(DEFAULT_SETTLEMENT_CONFIG);
+        settlement = new SettlementService(
+          DEFAULT_SETTLEMENT_CONFIG,
+          new PriceFeed(async () => ({ USDC: 0.9998, USDT: 1.0001, ETH: 2500, EUR: 1.1 }))
+        );
       });
 
-      it("should get exchange rate", () => {
-        const rate = settlement.getExchangeRate("USD", "USDC");
-        expect(rate).to.exist;
-        expect(rate!.rate).to.equal("1.000000");
+      it("should get the market exchange rate", async () => {
+        const rate = await settlement.getExchangeRate("USD", "USDC");
+        expect(rate.rate).to.equal("1.000200");
+        expect(rate.source).to.equal("coingecko");
+        expect((await settlement.getExchangeRate("EUR", "ETH")).rate).to.equal("0.000440");
+      });
+
+      it("refuses to price settlements without a current rate", async () => {
+        const offline = new SettlementService(
+          DEFAULT_SETTLEMENT_CONFIG,
+          new PriceFeed(async () => {
+            throw new Error("network down");
+          })
+        );
+        let error: Error | undefined;
+        try {
+          await offline.getExchangeRate("USD", "USDC");
+        } catch (e) {
+          error = e as Error;
+        }
+        expect(error?.message).to.match(/Exchange rates are unavailable: network down/);
       });
 
       it("should create settlement", async () => {
