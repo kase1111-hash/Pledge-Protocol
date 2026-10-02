@@ -4,7 +4,7 @@
  * Enterprise organization management, teams, SSO, and bulk operations.
  */
 
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import {
   Organization,
   OrganizationType,
@@ -752,8 +752,9 @@ export class OrganizationService {
     const plainKey = `pk_${randomUUID().replace(/-/g, "")}${randomUUID().replace(/-/g, "")}`;
     const keyPrefix = plainKey.slice(0, 11);
 
-    // In production: hash the key properly
-    const keyHash = Buffer.from(plainKey).toString("base64");
+    // Only a digest is kept; the key itself is shown once. The key is 256
+    // random bits, so a plain SHA-256 cannot be brute-forced.
+    const keyHash = createHash("sha256").update(plainKey).digest("hex");
 
     const apiKey: OrganizationApiKey = {
       id: keyId,
