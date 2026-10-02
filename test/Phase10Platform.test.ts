@@ -158,8 +158,8 @@ describe("NotificationService", () => {
   });
 
   describe("Digest", () => {
-    it("should generate digest content", () => {
-      const digest = service.generateDigest(testAddress, "weekly");
+    it("should generate digest content", async () => {
+      const digest = await service.generateDigest(testAddress, "weekly");
 
       expect(digest.address).toBe(testAddress);
       expect(digest.period).toBeDefined();

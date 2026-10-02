@@ -158,6 +158,7 @@ const publicOnlyLookup: LookupFunction = (hostname, options, callback) => {
 
 export interface OutboundResponse {
   status: number;
+  headers: http.IncomingHttpHeaders;
   /** Response body, truncated to maxResponseBytes */
   body: string;
 }
@@ -212,11 +213,19 @@ export async function requestUserUrl(rawUrl: string, options: OutboundRequest): 
           size += chunk.length;
           if (size >= maxBytes) {
             response.destroy();
-            resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") });
+            resolve({
+              status: response.statusCode ?? 0,
+              headers: response.headers,
+              body: Buffer.concat(chunks).toString("utf8"),
+            });
           }
         });
         response.on("end", () =>
-          resolve({ status: response.statusCode ?? 0, body: Buffer.concat(chunks).toString("utf8") })
+          resolve({
+            status: response.statusCode ?? 0,
+            headers: response.headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          })
         );
         response.on("error", reject);
       }

@@ -69,6 +69,7 @@ export function registerPersistentState(): void {
     "preferences",
     "notifications",
     "inAppNotifications",
+    "digestsSentAt",
   ]);
 
   // Payments: checkout sessions are indexed by our own session IDs, so the

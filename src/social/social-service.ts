@@ -219,6 +219,14 @@ export class SocialService {
   }
 
   /**
+   * Follow records for the people following an address
+   */
+  getFollowRecords(address: string): Follow[] {
+    const target = address.toLowerCase();
+    return Array.from(this.follows.values()).filter((f) => f.following === target);
+  }
+
+  /**
    * Unfollow a user
    */
   unfollow(follower: string, following: string): boolean {

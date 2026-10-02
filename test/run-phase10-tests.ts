@@ -90,16 +90,7 @@ describe("NotificationService", () => {
     assert(Array.isArray(notifications), "Returns array of notifications");
   });
 
-  describe("Digest Generation", () => {
-    const address = "0xtest_digest_1";
-
-    // Generate daily digest
-    const digest = notificationService.generateDigest(address, "daily");
-
-    assert(digest.address === address, "Digest address matches");
-    assert(digest.period.start < digest.period.end, "Period has valid range");
-    assert(typeof digest.summary.pledgesReceived === "number", "Digest has summary stats");
-  });
+  // Digests are covered by test/notification-delivery.test.ts
 
   describe("Delivery Stats", () => {
     const stats = notificationService.getDeliveryStats();

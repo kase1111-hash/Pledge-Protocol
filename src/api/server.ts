@@ -18,6 +18,7 @@ import { reportService } from "../reporting";
 import { gdprService } from "./routes/compliance";
 import { advancedCampaignService } from "../campaigns-advanced";
 import { flushEvents } from "../events";
+import { notificationService as notificationServiceV2 } from "../notifications-v2";
 
 const PORT = env.PORT;
 
@@ -64,7 +65,7 @@ initializeDatabase({
   await restorePersistentState();
   jobQueue.start();
 
-  // Scheduled reports and campaign actions whose time has come, and
+  // Scheduled reports, campaign actions and notifications whose time has come, and
   // confirmed data deletions whose grace period has ended
   const reportInterval = setInterval(() => {
     reportService
@@ -76,6 +77,12 @@ initializeDatabase({
     advancedCampaignService
       .processScheduledActions()
       .catch((err) => logger.error("Running scheduled campaign actions failed", err));
+    notificationServiceV2
+      .processDueNotifications()
+      .catch((err) => logger.error("Sending queued notifications failed", err));
+    notificationServiceV2
+      .processDueDigests()
+      .catch((err) => logger.error("Sending digests failed", err));
   }, 60_000);
 
   // Changes made outside a request (timers, background jobs) are stored here;

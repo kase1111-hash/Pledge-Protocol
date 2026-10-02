@@ -188,6 +188,8 @@ export interface DeviceToken {
 export interface EmailConfig {
   provider: "sendgrid" | "ses" | "mailgun" | "smtp";
   apiKey?: string;
+  /** Mailgun sending domain; defaults to the domain of fromEmail */
+  domain?: string;
   fromEmail: string;
   fromName: string;
   replyTo?: string;
